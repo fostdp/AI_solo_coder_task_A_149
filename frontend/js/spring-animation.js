@@ -1,9 +1,11 @@
 const SpringAnimation = (function () {
-    let canvas, ctx;
-    let width, height;
+    let scene, camera, renderer, springMesh, springGroup;
+    let container, canvas;
+    let animationId = null;
     let currentTorsion = 0;
     let targetTorsion = 0;
-    let animationId = null;
+    let cycleCount = 0;
+    let damageRatio = 0;
     let springConfig = {
         wireDiameter: 0.02,
         coilMeanDiameter: 0.15,
@@ -11,29 +13,377 @@ const SpringAnimation = (function () {
         material: TrebuchetPhysics.MATERIALS.steel65mn
     };
 
+    const springVertexShader = `
+        uniform float uTorsion;
+        uniform float uTurns;
+        uniform float uSpringHeight;
+        uniform float uSpringRadius;
+        uniform float uWireRadius;
+        uniform float uDamage;
+        uniform float uTime;
+        uniform float uCycleCount;
+        uniform float uElapsed;
+
+        attribute float aSegmentIndex;
+        attribute float aRingIndex;
+
+        varying vec3 vNormal;
+        varying float vDepth;
+        varying float vStress;
+        varying vec3 vWorldPos;
+
+        #define PI 3.14159265359
+
+        void main() {
+            float totalSegments = 512.0;
+            float totalRings = 16.0;
+            float t = aSegmentIndex / totalSegments;
+            float ringAngle = aRingIndex / totalRings * 2.0 * PI;
+
+            float compressionFactor = 1.0 + sin(uTorsion * 0.3) * 0.15;
+            float springH = uSpringHeight * compressionFactor;
+            float springR = uSpringRadius * (1.0 + sin(t * PI) * 0.08);
+
+            float plasticBuckle = 0.0;
+            if (uDamage > 0.5) {
+                plasticBuckle = sin(t * PI * 3.0 + uTime * 0.5) * 0.02 * (uDamage - 0.5) * 2.0;
+            }
+
+            float baseAngle = t * uTurns * 2.0 * PI;
+            float dynamicAngle = baseAngle + uTorsion * (t - 0.5) * 1.2;
+
+            float centerX = cos(dynamicAngle) * springR;
+            float centerY = -t * springH + springH * 0.5 + plasticBuckle;
+            float centerZ = sin(dynamicAngle) * springR;
+
+            vec3 tangent = normalize(vec3(
+                -sin(dynamicAngle) * springR,
+                -springH / (uTurns * 2.0 * PI),
+                cos(dynamicAngle) * springR
+            ));
+            vec3 up = vec3(0.0, 1.0, 0.0);
+            vec3 normalAxis = normalize(cross(tangent, up));
+            vec3 binormal = normalize(cross(tangent, normalAxis));
+
+            float damageThinning = 1.0 - uDamage * 0.25;
+            float wireR = uWireRadius * damageThinning;
+            float vibration = 0.0;
+            float elapsed = uElapsed;
+            if (elapsed < 0.8) {
+                vibration = sin(elapsed * 60.0) * exp(-elapsed * 6.0) * 0.008;
+            }
+            wireR += vibration;
+
+            vec3 offset = normalAxis * cos(ringAngle) * wireR
+                        + binormal * sin(ringAngle) * wireR;
+
+            vec3 finalPos = vec3(centerX, centerY, centerZ) + offset;
+
+            vStress = abs(sin(dynamicAngle)) * (abs(uTorsion) / 3.5);
+            vDepth = t;
+            vWorldPos = finalPos;
+
+            vec3 ringNormal = normalize(offset);
+            vNormal = ringNormal;
+
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(finalPos, 1.0);
+        }
+    `;
+
+    const springFragmentShader = `
+        uniform float uTorsion;
+        uniform float uDamage;
+        uniform float uTime;
+
+        varying vec3 vNormal;
+        varying float vDepth;
+        varying float vStress;
+        varying vec3 vWorldPos;
+
+        vec3 hsv2rgb(vec3 c) {
+            vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+            vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+            return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+        }
+
+        void main() {
+            vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
+            vec3 viewDir = normalize(cameraPosition - vWorldPos);
+
+            float diff = max(dot(vNormal, lightDir), 0.0);
+            vec3 halfDir = normalize(lightDir + viewDir);
+            float spec = pow(max(dot(vNormal, halfDir), 0.0), 64.0);
+
+            vec3 baseColor;
+            float stressLevel = clamp(vStress + uDamage * 0.5, 0.0, 1.0);
+
+            if (stressLevel < 0.5) {
+                vec3 coolBlue = vec3(0.45, 0.58, 0.82);
+                vec3 midGray = vec3(0.55, 0.60, 0.68);
+                baseColor = mix(coolBlue, midGray, stressLevel * 2.0);
+            } else if (stressLevel < 0.75) {
+                vec3 midGray = vec3(0.55, 0.60, 0.68);
+                vec3 warningYellow = vec3(1.0, 0.76, 0.03);
+                baseColor = mix(midGray, warningYellow, (stressLevel - 0.5) * 4.0);
+            } else {
+                vec3 warningYellow = vec3(1.0, 0.76, 0.03);
+                vec3 dangerRed = vec3(1.0, 0.28, 0.34);
+                baseColor = mix(warningYellow, dangerRed, (stressLevel - 0.75) * 4.0);
+            }
+
+            float ambient = 0.25;
+            vec3 color = baseColor * (ambient + diff * 0.7) + vec3(1.0) * spec * 0.4;
+
+            float damageCracks = 0.0;
+            if (uDamage > 0.3) {
+                float crackNoise = fract(sin(dot(vWorldPos.xz * 20.0, vec2(12.9898, 78.233))) * 43758.5453);
+                damageCracks = smoothstep(0.98 - uDamage * 0.1, 1.0, crackNoise) * (uDamage - 0.3) * 2.0;
+                color = mix(color, vec3(0.05, 0.03, 0.02), damageCracks);
+            }
+
+            float rim = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 3.0) * 0.3;
+            color += rim * baseColor;
+
+            float glow = stressLevel * 0.4 + uDamage * 0.3;
+            color += baseColor * glow * 0.25;
+
+            gl_FragColor = vec4(color, 1.0);
+        }
+    `;
+
     function init(canvasId) {
         canvas = document.getElementById(canvasId);
-        ctx = canvas.getContext('2d');
-        resize();
-        window.addEventListener('resize', resize);
-        draw();
+        container = canvas.parentElement;
+
+        const rect = container.getBoundingClientRect();
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0e1a);
+
+        camera = new THREE.PerspectiveCamera(45, rect.width / rect.height, 0.01, 100);
+        camera.position.set(0.8, 0.2, 1.6);
+        camera.lookAt(0, 0, 0);
+
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+        renderer.setSize(rect.width, rect.height);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+        setupLights();
+        createSpringMesh();
+        createGroundGrid();
+        setupControls();
+
+        window.addEventListener('resize', onResize);
+        animate();
     }
 
-    function resize() {
-        const rect = canvas.parentElement.getBoundingClientRect();
-        width = rect.width;
-        height = rect.height;
-        canvas.width = width * window.devicePixelRatio;
-        canvas.height = height * window.devicePixelRatio;
-        canvas.style.width = width + 'px';
-        canvas.style.height = height + 'px';
-        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    function setupLights() {
+        const ambient = new THREE.AmbientLight(0x404060, 0.5);
+        scene.add(ambient);
+
+        const keyLight = new THREE.DirectionalLight(0xfff0d4, 1.2);
+        keyLight.position.set(3, 5, 4);
+        scene.add(keyLight);
+
+        const rimLight = new THREE.DirectionalLight(0x4488ff, 0.6);
+        rimLight.position.set(-3, 2, -3);
+        scene.add(rimLight);
+
+        const fillLight = new THREE.PointLight(0xff8844, 0.5, 10);
+        fillLight.position.set(0, -2, 1);
+        scene.add(fillLight);
+    }
+
+    function createGroundGrid() {
+        const gridGeo = new THREE.PlaneGeometry(6, 6, 30, 30);
+        const gridMat = new THREE.MeshBasicMaterial({
+            color: 0x1a2540,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.3
+        });
+        const grid = new THREE.Mesh(gridGeo, gridMat);
+        grid.rotation.x = -Math.PI / 2;
+        grid.position.y = -0.8;
+        scene.add(grid);
+
+        const planeGeo = new THREE.PlaneGeometry(6, 6);
+        const planeMat = new THREE.MeshBasicMaterial({
+            color: 0x0a1020,
+            transparent: true,
+            opacity: 0.6
+        });
+        const plane = new THREE.Mesh(planeGeo, planeMat);
+        plane.rotation.x = -Math.PI / 2;
+        plane.position.y = -0.801;
+        scene.add(plane);
+    }
+
+    function createSpringMesh() {
+        springGroup = new THREE.Group();
+        scene.add(springGroup);
+
+        const totalSegments = 512;
+        const ringsPerSegment = 16;
+        const totalVertices = totalSegments * ringsPerSegment;
+
+        const positions = new Float32Array(totalVertices * 3);
+        const indices = [];
+        const segmentIndex = new Float32Array(totalVertices);
+        const ringIndex = new Float32Array(totalVertices);
+
+        let vi = 0;
+        for (let i = 0; i < totalSegments; i++) {
+            for (let j = 0; j < ringsPerSegment; j++) {
+                positions[vi * 3] = 0;
+                positions[vi * 3 + 1] = 0;
+                positions[vi * 3 + 2] = 0;
+                segmentIndex[vi] = i;
+                ringIndex[vi] = j;
+                vi++;
+            }
+        }
+
+        for (let i = 0; i < totalSegments - 1; i++) {
+            for (let j = 0; j < ringsPerSegment; j++) {
+                const a = i * ringsPerSegment + j;
+                const b = i * ringsPerSegment + ((j + 1) % ringsPerSegment);
+                const c = (i + 1) * ringsPerSegment + j;
+                const d = (i + 1) * ringsPerSegment + ((j + 1) % ringsPerSegment);
+                indices.push(a, c, b);
+                indices.push(b, c, d);
+            }
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('aSegmentIndex', new THREE.BufferAttribute(segmentIndex, 1));
+        geometry.setAttribute('aRingIndex', new THREE.BufferAttribute(ringIndex, 1));
+        geometry.setIndex(indices);
+        geometry.computeVertexNormals();
+
+        const material = new THREE.ShaderMaterial({
+            uniforms: {
+                uTorsion: { value: 0.0 },
+                uTurns: { value: springConfig.activeCoils },
+                uSpringHeight: { value: 1.2 },
+                uSpringRadius: { value: 0.45 },
+                uWireRadius: { value: 0.05 },
+                uDamage: { value: 0.0 },
+                uTime: { value: 0.0 },
+                uCycleCount: { value: 0.0 },
+                uElapsed: { value: 10.0 }
+            },
+            vertexShader: springVertexShader,
+            fragmentShader: springFragmentShader,
+            side: THREE.DoubleSide
+        });
+
+        springMesh = new THREE.Mesh(geometry, material);
+        springGroup.add(springMesh);
+
+        createEndCaps();
+    }
+
+    function createEndCaps() {
+        const capMat = new THREE.MeshStandardMaterial({
+            color: 0x3a4a6a,
+            metalness: 0.6,
+            roughness: 0.4
+        });
+
+        const topCap = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.32, 0.32, 0.08, 24),
+            capMat
+        );
+        topCap.position.y = 0.65;
+        topCap.name = 'topCap';
+        springGroup.add(topCap);
+
+        const topPlate = new THREE.Mesh(
+            new THREE.BoxGeometry(0.8, 0.06, 0.5),
+            new THREE.MeshStandardMaterial({ color: 0x8b7355, roughness: 0.8 })
+        );
+        topPlate.position.y = 0.72;
+        springGroup.add(topPlate);
+
+        const bottomCap = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.32, 0.32, 0.08, 24),
+            capMat
+        );
+        bottomCap.position.y = -0.65;
+        bottomCap.name = 'bottomCap';
+        springGroup.add(bottomCap);
+
+        const pointerMat = new THREE.MeshStandardMaterial({
+            color: 0xffb347,
+            emissive: 0x553300,
+            metalness: 0.8,
+            roughness: 0.2
+        });
+        const pointer = new THREE.Mesh(
+            new THREE.ConeGeometry(0.12, 0.4, 3),
+            pointerMat
+        );
+        pointer.rotation.z = -Math.PI / 2;
+        pointer.position.set(0.45, -0.72, 0);
+        pointer.name = 'pointer';
+        springGroup.add(pointer);
+    }
+
+    function setupControls() {
+        let isDragging = false;
+        let prev = { x: 0, y: 0 };
+        let spherical = { theta: 0.8, phi: 1.1, radius: 2.0 };
+        const target = new THREE.Vector3(0, 0, 0);
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            prev = { x: e.clientX, y: e.clientY };
+        });
+        canvas.addEventListener('mouseup', () => isDragging = false);
+        canvas.addEventListener('mouseleave', () => isDragging = false);
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            spherical.theta -= (e.clientX - prev.x) * 0.005;
+            spherical.phi = Math.max(0.2, Math.min(Math.PI - 0.2,
+                spherical.phi + (e.clientY - prev.y) * 0.005));
+            prev = { x: e.clientX, y: e.clientY };
+            updateCamera();
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            spherical.radius = Math.max(0.8, Math.min(6, spherical.radius + e.deltaY * 0.003));
+            updateCamera();
+        });
+
+        function updateCamera() {
+            camera.position.x = target.x + spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta);
+            camera.position.y = target.y + spherical.radius * Math.cos(spherical.phi);
+            camera.position.z = target.z + spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta);
+            camera.lookAt(target);
+        }
+        updateCamera();
+    }
+
+    function onResize() {
+        if (!container) return;
+        const rect = container.getBoundingClientRect();
+        camera.aspect = rect.width / rect.height;
+        camera.updateProjectionMatrix();
+        renderer.setSize(rect.width, rect.height);
     }
 
     function setConfig(config) {
         springConfig = { ...springConfig, ...config };
-        if (springConfig.material) {
-            springConfig.material = config.material;
+        if (springMesh && springMesh.material.uniforms) {
+            const u = springMesh.material.uniforms;
+            u.uTurns.value = springConfig.activeCoils;
+            u.uWireRadius.value = Math.max(0.01, springConfig.wireDiameter / 0.02 * 0.05);
+            u.uSpringRadius.value = Math.max(0.15, springConfig.coilMeanDiameter / 0.15 * 0.45);
         }
     }
 
@@ -41,291 +391,47 @@ const SpringAnimation = (function () {
         targetTorsion = angleDeg;
     }
 
-    function getConfig() {
-        return springConfig;
+    function setCycleInfo(count, damage) {
+        cycleCount = count;
+        damageRatio = damage;
     }
 
-    function drawBackground() {
-        const gradient = ctx.createLinearGradient(0, 0, 0, height);
-        gradient.addColorStop(0, '#0a0e1a');
-        gradient.addColorStop(1, '#141a2e');
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, width, height);
+    function animate() {
+        animationId = requestAnimationFrame(animate);
+        const t = performance.now() * 0.001;
 
-        ctx.strokeStyle = 'rgba(42, 58, 90, 0.3)';
-        ctx.lineWidth = 1;
-        const gridSize = 40;
-        for (let x = 0; x < width; x += gridSize) {
-            ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, height);
-            ctx.stroke();
-        }
-        for (let y = 0; y < height; y += gridSize) {
-            ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(width, y);
-            ctx.stroke();
-        }
-    }
+        const diff = targetTorsion - currentTorsion;
+        const absDiff = Math.abs(diff);
+        const speed = absDiff > 10 ? 0.25 : 0.1;
+        currentTorsion += diff * speed;
 
-    function drawSpring(torsionDeg) {
-        const centerX = width / 2;
-        const centerY = height / 2 + 20;
-        const springRadius = Math.min(width, height) * 0.28;
-        const turns = springConfig.activeCoils;
-        const wireThickness = Math.max(3, springConfig.wireDiameter / 0.02 * 4);
-        const segments = turns * 40;
+        if (springMesh) {
+            const u = springMesh.material.uniforms;
+            u.uTorsion.value = TrebuchetPhysics.degToRad(currentTorsion);
+            u.uTime.value = t;
+            u.uDamage.value = damageRatio;
+            u.uCycleCount.value = cycleCount;
 
-        const torsionRad = TrebuchetPhysics.degToRad(torsionDeg);
-        const energyResult = TrebuchetPhysics.calculateSpringEnergy(springConfig, torsionRad);
-
-        let springColor = '#4a5568';
-        let glowColor = 'rgba(100, 120, 160, 0.3)';
-        if (energyResult.riskLevel === 'warning') {
-            springColor = '#ffc107';
-            glowColor = 'rgba(255, 193, 7, 0.4)';
-        } else if (energyResult.riskLevel === 'critical') {
-            springColor = '#ff4757';
-            glowColor = 'rgba(255, 71, 87, 0.5)';
-        } else if (torsionDeg > 60) {
-            springColor = '#7a9acc';
-            glowColor = 'rgba(122, 154, 204, 0.4)';
-        }
-
-        const depthFactor = 0.4;
-        const springHeight = springRadius * 1.8;
-        const springStartY = centerY - springHeight / 2;
-
-        const totalRotation = torsionDeg / 360 * Math.PI * 2;
-
-        ctx.save();
-        ctx.shadowColor = glowColor;
-        ctx.shadowBlur = 20;
-
-        for (let side = 0; side < 2; side++) {
-            ctx.beginPath();
-            for (let i = 0; i <= segments; i++) {
-                const t = i / segments;
-                const angle = t * turns * Math.PI * 2 + totalRotation * t;
-                const coilRadius = springRadius * (1 + Math.sin(t * Math.PI) * 0.05);
-                const zAngle = Math.cos(angle + (side === 0 ? 0 : Math.PI));
-                const x = centerX + Math.cos(angle) * coilRadius * (side === 0 ? 1 : 0.3);
-                const y = springStartY + t * springHeight;
-                const thickness = wireThickness * (0.5 + 0.5 * (zAngle * 0.5 + 0.5));
-
-                if (i === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
+            if (absDiff > 0.5 && u.uElapsed.value > 0.8) {
+                u.uElapsed.value = 0;
             }
-            ctx.strokeStyle = side === 0 ? springColor : adjustColor(springColor, -40);
-            ctx.lineWidth = side === 0 ? wireThickness : wireThickness * 0.6;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.stroke();
-        }
-
-        for (let layer = 0; layer < 2; layer++) {
-            ctx.beginPath();
-            for (let i = 0; i <= segments; i++) {
-                const t = i / segments;
-                const angle = t * turns * Math.PI * 2 + totalRotation * t;
-                const perspective = layer === 0 ? 1 : 0.92;
-                const x = centerX + Math.cos(angle) * springRadius * perspective;
-                const y = springStartY + t * springHeight;
-                if (i === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
-            }
-            ctx.strokeStyle = layer === 0 ? springColor : adjustColor(springColor, 20);
-            ctx.lineWidth = wireThickness * (layer === 0 ? 1 : 0.8);
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.stroke();
-        }
-        ctx.restore();
-
-        drawEnds(springStartY, springHeight, springRadius, centerX, torsionDeg);
-        drawEnergyIndicator(torsionDeg, energyResult);
-        drawInfoPanel(centerX, springStartY, springRadius, torsionDeg, energyResult);
-    }
-
-    function drawEnds(startY, springH, radius, centerX, torsionDeg) {
-        const endWidth = radius * 0.8;
-        const rot = TrebuchetPhysics.degToRad(torsionDeg);
-
-        ctx.save();
-        ctx.fillStyle = '#3a4a6a';
-        ctx.strokeStyle = '#5a6a8a';
-        ctx.lineWidth = 2;
-
-        ctx.beginPath();
-        ctx.roundRect(centerX - endWidth / 2, startY - 25, endWidth, 20, 4);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = '#8b7355';
-        ctx.fillRect(centerX - radius * 0.4, startY - 30, radius * 0.8, 6);
-
-        ctx.translate(centerX, startY + springH + 10);
-        ctx.rotate(rot * 0.3);
-
-        ctx.fillStyle = '#3a4a6a';
-        ctx.strokeStyle = '#5a6a8a';
-        ctx.beginPath();
-        ctx.roundRect(-endWidth / 2, 0, endWidth, 20, 4);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = '#ffb347';
-        ctx.beginPath();
-        ctx.moveTo(endWidth / 2, 10);
-        ctx.lineTo(endWidth / 2 + 15 + Math.abs(rot) * 30, 10);
-        ctx.lineTo(endWidth / 2 + Math.abs(rot) * 30, 4);
-        ctx.lineTo(endWidth / 2 + Math.abs(rot) * 30, 16);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
-    }
-
-    function drawEnergyIndicator(torsionDeg, energyResult) {
-        const barWidth = 30;
-        const barHeight = height * 0.5;
-        const barX = 30;
-        const barY = (height - barHeight) / 2;
-
-        ctx.save();
-        ctx.fillStyle = 'rgba(10, 14, 26, 0.8)';
-        ctx.strokeStyle = '#2a3a5a';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.roundRect(barX - 5, barY - 5, barWidth + 10, barHeight + 40, 4);
-        ctx.fill();
-        ctx.stroke();
-
-        const maxAngle = 180;
-        const fillHeight = (Math.min(torsionDeg, maxAngle) / maxAngle) * barHeight;
-        const fillY = barY + barHeight - fillHeight;
-
-        let gradColor1 = '#2ed573';
-        let gradColor2 = '#7bed9f';
-        if (energyResult.riskLevel === 'warning') {
-            gradColor1 = '#ffc107';
-            gradColor2 = '#ffd54f';
-        } else if (energyResult.riskLevel === 'critical') {
-            gradColor1 = '#ff4757';
-            gradColor2 = '#ff6b81';
-        }
-
-        const gradient = ctx.createLinearGradient(0, fillY, 0, barY + barHeight);
-        gradient.addColorStop(0, gradColor1);
-        gradient.addColorStop(1, gradColor2);
-
-        ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.roundRect(barX, fillY, barWidth, fillHeight, 3);
-        ctx.fill();
-
-        for (let i = 0; i <= 10; i++) {
-            const y = barY + (i / 10) * barHeight;
-            ctx.strokeStyle = i % 5 === 0 ? '#8a9ab5' : '#4a5a7a';
-            ctx.lineWidth = i % 5 === 0 ? 2 : 1;
-            ctx.beginPath();
-            ctx.moveTo(barX + barWidth + 3, y);
-            ctx.lineTo(barX + barWidth + (i % 5 === 0 ? 10 : 6), y);
-            ctx.stroke();
-            if (i % 5 === 0) {
-                ctx.fillStyle = '#8a9ab5';
-                ctx.font = '10px monospace';
-                ctx.textAlign = 'left';
-                ctx.fillText((10 - i) * 18 + '°', barX + barWidth + 14, y + 3);
+            if (u.uElapsed.value < 2.0) {
+                u.uElapsed.value += 0.016;
             }
         }
 
-        ctx.fillStyle = '#e4e8f0';
-        ctx.font = 'bold 11px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('扭转', barX + barWidth / 2, barY + barHeight + 18);
-        ctx.fillStyle = '#ffb347';
-        ctx.font = 'bold 12px monospace';
-        ctx.fillText(torsionDeg.toFixed(0) + '°', barX + barWidth / 2, barY + barHeight + 32);
-        ctx.restore();
-    }
+        const bottomCap = springGroup.getObjectByName('bottomCap');
+        const pointer = springGroup.getObjectByName('pointer');
+        if (bottomCap) {
+            bottomCap.rotation.y = TrebuchetPhysics.degToRad(currentTorsion) * 0.3;
+        }
+        if (pointer) {
+            pointer.parent.updateMatrixWorld();
+            pointer.position.x = 0.45 + Math.abs(TrebuchetPhysics.degToRad(currentTorsion)) * 0.3;
+            pointer.rotation.y = TrebuchetPhysics.degToRad(currentTorsion) * 0.2;
+        }
 
-    function drawInfoPanel(centerX, startY, radius, torsionDeg, energyResult) {
-        ctx.save();
-        ctx.fillStyle = 'rgba(13, 20, 40, 0.9)';
-        ctx.strokeStyle = '#2a3a5a';
-        ctx.lineWidth = 1;
-        const panelX = width - 210;
-        const panelY = 20;
-        ctx.beginPath();
-        ctx.roundRect(panelX, panelY, 190, 110, 6);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.font = 'bold 12px sans-serif';
-        ctx.fillStyle = '#a8b8d5';
-        ctx.textAlign = 'left';
-        ctx.fillText('⚡ 实时储能状态', panelX + 12, panelY + 22);
-
-        ctx.font = '11px monospace';
-        ctx.fillStyle = '#8a9ab5';
-        ctx.fillText('储能:', panelX + 12, panelY + 44);
-        ctx.fillStyle = '#ffb347';
-        ctx.font = 'bold 14px monospace';
-        ctx.fillText((energyResult.stored_energy / 1000).toFixed(2) + ' kJ', panelX + 70, panelY + 44);
-
-        ctx.font = '11px monospace';
-        ctx.fillStyle = '#8a9ab5';
-        ctx.fillText('效率:', panelX + 12, panelY + 66);
-        ctx.fillStyle = '#e4e8f0';
-        ctx.fillText((energyResult.efficiency * 100).toFixed(1) + '%', panelX + 70, panelY + 66);
-
-        ctx.fillStyle = '#8a9ab5';
-        ctx.fillText('应力比:', panelX + 12, panelY + 88);
-        let stressColor = '#2ed573';
-        if (energyResult.riskLevel === 'warning') stressColor = '#ffc107';
-        if (energyResult.riskLevel === 'critical') stressColor = '#ff4757';
-        ctx.fillStyle = stressColor;
-        ctx.fillText((energyResult.yieldStrengthRatio * 100).toFixed(1) + '%', panelX + 70, panelY + 88);
-
-        ctx.fillStyle = '#8a9ab5';
-        ctx.fillText('风险:', panelX + 12, panelY + 106);
-        let riskText = '正常';
-        if (energyResult.riskLevel === 'warning') riskText = '警告';
-        if (energyResult.riskLevel === 'critical') riskText = '危险';
-        ctx.fillStyle = stressColor;
-        ctx.font = 'bold 12px sans-serif';
-        ctx.fillText(riskText, panelX + 70, panelY + 106);
-
-        ctx.restore();
-    }
-
-    function adjustColor(color, amount) {
-        const hex = color.replace('#', '');
-        let r = parseInt(hex.substr(0, 2), 16);
-        let g = parseInt(hex.substr(2, 2), 16);
-        let b = parseInt(hex.substr(4, 2), 16);
-        r = Math.max(0, Math.min(255, r + amount));
-        g = Math.max(0, Math.min(255, g + amount));
-        b = Math.max(0, Math.min(255, b + amount));
-        return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
-    }
-
-    function draw() {
-        currentTorsion += (targetTorsion - currentTorsion) * 0.08;
-        drawBackground();
-        drawSpring(currentTorsion);
-        animationId = requestAnimationFrame(draw);
-    }
-
-    function stop() {
-        if (animationId) cancelAnimationFrame(animationId);
+        renderer.render(scene, camera);
     }
 
     function getCurrentEnergy() {
@@ -333,12 +439,21 @@ const SpringAnimation = (function () {
         return TrebuchetPhysics.calculateSpringEnergy(springConfig, torsionRad);
     }
 
+    function getConfig() {
+        return springConfig;
+    }
+
+    function stop() {
+        if (animationId) cancelAnimationFrame(animationId);
+    }
+
     return {
         init,
         setConfig,
         setTorsion,
-        getConfig,
+        setCycleInfo,
         getCurrentEnergy,
+        getConfig,
         stop
     };
 })();
