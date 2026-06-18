@@ -135,7 +135,7 @@ bool MqttAlertManager::connect() {
     read(impl_->sock_fd, resp_buf, 4);
 #endif
 
-    if (resp_buf[0] == 0x20 && resp_buf.size() >= 4 && resp_buf[3] == 0) {
+    if (resp_buf[0] == 0x20 && sizeof(resp_buf) >= 4 && resp_buf[3] == 0) {
         impl_->connected = true;
         return true;
     }
@@ -173,6 +173,7 @@ std::string MqttAlertManager::alertTypeToString(AlertType type) {
         case AlertType::EFFICIENCY_LOW: return "efficiency_low";
         case AlertType::SENSOR_TIMEOUT: return "sensor_timeout";
         case AlertType::SYSTEM_ERROR: return "system_error";
+        case AlertType::CYCLIC_FATIGUE_RISK: return "cyclic_fatigue_risk";
     }
     return "unknown";
 }
@@ -306,6 +307,30 @@ bool MqttAlertManager::publishEfficiencyWarning(
         << "预期=" << (expected_efficiency * 100) << "%";
     alert.message = msg.str();
     alert.threshold_value = expected_efficiency;
+    return publishAlert(alert);
+}
+
+bool MqttAlertManager::publishCyclicFatigueWarning(
+    const std::string& machine_id,
+    int64_t cycle_count,
+    double cyclic_damage_ratio,
+    double plastic_strain,
+    int64_t remaining_life_cycles
+) {
+    AlertMessage alert;
+    alert.machine_id = machine_id;
+    alert.timestamp = std::chrono::system_clock::now();
+    alert.type = AlertType::CYCLIC_FATIGUE_RISK;
+    alert.level = cyclic_damage_ratio > 0.8 ? AlertLevel::CRITICAL
+                : cyclic_damage_ratio > 0.5 ? AlertLevel::WARNING
+                : AlertLevel::INFO;
+    std::ostringstream msg;
+    msg << "循环疲劳风险: 循环次数=" << cycle_count
+        << ", 损伤比=" << (cyclic_damage_ratio * 100) << "%"
+        << ", 塑性应变=" << plastic_strain
+        << ", 剩余寿命=" << remaining_life_cycles << "次";
+    alert.message = msg.str();
+    alert.threshold_value = cyclic_damage_ratio;
     return publishAlert(alert);
 }
 
