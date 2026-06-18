@@ -22,6 +22,15 @@ struct SensorRecord {
     double launch_angle;
     std::string spring_status;
     std::string risk_level;
+    double shear_stress;
+    double elastic_stress;
+    double plastic_strain;
+    int64_t cycle_count;
+    double cyclic_damage_ratio;
+    double modulus_reduction;
+    double max_mach;
+    double compressibility_correction;
+    uint8_t fatigue_risk;
 };
 
 struct AlertRecord {
@@ -35,6 +44,9 @@ struct AlertRecord {
     double actual_range;
     double predicted_range;
     double threshold_value;
+    double cyclic_damage_ratio;
+    int64_t cycle_count;
+    double max_mach;
 };
 
 struct RangePredictionRecord {
@@ -46,6 +58,11 @@ struct RangePredictionRecord {
     double max_height;
     double flight_time;
     double air_resistance_factor;
+    double max_mach;
+    double compressibility_correction;
+    double impact_velocity;
+    double impact_mach;
+    double temperature_k;
 };
 
 struct SpringEnergyRecord {
@@ -53,9 +70,16 @@ struct SpringEnergyRecord {
     double torsion_angle;
     double stored_energy;
     double shear_stress;
+    double elastic_stress;
+    double plastic_strain;
     double spring_constant;
     double efficiency;
     double yield_strength_ratio;
+    int64_t cycle_count;
+    double cyclic_damage_ratio;
+    double modulus_reduction;
+    double back_stress;
+    double degraded_yield_strength;
 };
 
 class ClickHouseClient {
@@ -80,6 +104,16 @@ public:
     bool insertAlert(const AlertRecord& record);
     bool insertSpringEnergy(const SpringEnergyRecord& record);
     bool insertRangePrediction(const RangePredictionRecord& record);
+    bool insertCyclicFatigueLog(
+        const std::string& machine_id,
+        int64_t cycle_count,
+        double plastic_strain_amplitude,
+        double accumulated_plastic_strain,
+        double damaged_shear_modulus,
+        double damaged_yield_strength,
+        double damage_parameter,
+        int64_t remaining_life_cycles
+    );
 
     std::vector<SensorRecord> queryRecentSensorData(
         const std::string& machine_id,
@@ -100,6 +134,9 @@ public:
         double last_actual_range;
         double last_predicted_range;
         std::string current_risk_level;
+        int64_t total_cycles;
+        double current_damage_ratio;
+        double last_max_mach;
         int unacknowledged_alerts;
     };
 
