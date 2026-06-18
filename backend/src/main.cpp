@@ -21,6 +21,7 @@ std::mutex g_storage_mutex;
 
 physics::TorsionSpringConfig g_spring_config;
 physics::ProjectileConfig g_projectile_config;
+std::mutex g_cyclic_state_mutex;
 
 struct ServerContext {
     std::unique_ptr<storage::ClickHouseClient> clickhouse;
@@ -56,22 +57,38 @@ std::string urlDecode(const std::string& encoded) {
 void onSensorDataReceived(const network::SensorDataPacket& packet) {
     if (!g_ctx || !g_ctx->clickhouse) return;
 
-    auto spring_result = physics::calculateSpringEnergy(
-        g_spring_config, packet.torsion_angle
-    );
+    physics::SpringEnergyResult spring_result;
+    physics::RangePredictionResult range_pred;
+
+    {
+        std::lock_guard<std::mutex> lock(g_cyclic_state_mutex);
+        physics::updateCyclicSoftening(
+            g_spring_config,
+            packet.torsion_angle,
+            physics::calculateShearStress(g_spring_config, packet.torsion_angle)
+        );
+        spring_result = physics::calculateSpringEnergy(
+            g_spring_config, packet.torsion_angle
+        );
+    }
 
     physics::ProjectileConfig proj = g_projectile_config;
     proj.mass = packet.projectile_mass;
-    auto range_pred = physics::predictTrajectoryRange(
+    range_pred = physics::predictTrajectoryRange(
         proj, packet.release_velocity, packet.launch_angle
     );
 
     std::string risk_level = "normal";
-    if (spring_result.yield_strength_ratio > 0.85) {
+    if (spring_result.yield_strength_ratio > 0.85 || spring_result.fatigue_risk) {
         risk_level = "critical";
-    } else if (spring_result.yield_strength_ratio > 0.70 || range_pred.insufficient_range) {
+    } else if (spring_result.yield_strength_ratio > 0.70
+            || range_pred.insufficient_range
+            || spring_result.cyclic_damage_ratio > 0.5) {
         risk_level = "warning";
     }
+
+    double modulus_reduction = g_spring_config.cyclic_state.degraded_shear_modulus
+                             / g_spring_config.material.shear_modulus;
 
     storage::SensorRecord record;
     record.machine_id = packet.machine_id;
@@ -87,6 +104,19 @@ void onSensorDataReceived(const network::SensorDataPacket& packet) {
     record.launch_angle = packet.launch_angle;
     record.spring_status = packet.spring_status;
     record.risk_level = risk_level;
+    record.shear_stress = spring_result.shear_stress;
+    record.elastic_stress = spring_result.elastic_stress;
+    record.plastic_strain = packet.plastic_strain > 0 ? packet.plastic_strain
+                                                       : spring_result.plastic_strain;
+    record.cycle_count = packet.cycle_count > 0 ? packet.cycle_count
+                                                 : spring_result.cycle_count;
+    record.cyclic_damage_ratio = packet.cyclic_damage_ratio > 0
+                                     ? packet.cyclic_damage_ratio
+                                     : spring_result.cyclic_damage_ratio;
+    record.modulus_reduction = modulus_reduction;
+    record.max_mach = packet.max_mach > 0 ? packet.max_mach : range_pred.max_mach;
+    record.compressibility_correction = range_pred.compressibility_correction;
+    record.fatigue_risk = spring_result.fatigue_risk ? 1 : 0;
 
     {
         std::lock_guard<std::mutex> lock(g_storage_mutex);
@@ -97,10 +127,54 @@ void onSensorDataReceived(const network::SensorDataPacket& packet) {
         ser.torsion_angle = packet.torsion_angle;
         ser.stored_energy = spring_result.stored_energy;
         ser.shear_stress = spring_result.shear_stress;
+        ser.elastic_stress = spring_result.elastic_stress;
+        ser.plastic_strain = spring_result.plastic_strain;
         ser.spring_constant = spring_result.spring_constant;
         ser.efficiency = spring_result.efficiency;
         ser.yield_strength_ratio = spring_result.yield_strength_ratio;
+        ser.cycle_count = spring_result.cycle_count;
+        ser.cyclic_damage_ratio = spring_result.cyclic_damage_ratio;
+        ser.modulus_reduction = modulus_reduction;
+        ser.back_stress = g_spring_config.cyclic_state.back_stress;
+        ser.degraded_yield_strength = g_spring_config.cyclic_state.degraded_yield_strength;
         g_ctx->clickhouse->insertSpringEnergy(ser);
+
+        storage::RangePredictionRecord rpr;
+        rpr.machine_id = packet.machine_id;
+        rpr.projectile_mass = packet.projectile_mass;
+        rpr.launch_angle = packet.launch_angle;
+        rpr.release_velocity = packet.release_velocity;
+        rpr.predicted_range = range_pred.predicted_range;
+        rpr.max_height = range_pred.max_height;
+        rpr.flight_time = range_pred.flight_time;
+        rpr.air_resistance_factor = range_pred.air_resistance_factor;
+        rpr.max_mach = range_pred.max_mach;
+        rpr.compressibility_correction = range_pred.compressibility_correction;
+        rpr.impact_velocity = 0.0;
+        rpr.impact_mach = 0.0;
+        rpr.temperature_k = 288.15;
+        g_ctx->clickhouse->insertRangePrediction(rpr);
+
+        int64_t remaining_life = 0;
+        if (spring_result.plastic_strain > 1e-9) {
+            double life = physics::calculateCoffinMansonLife(
+                g_spring_config.material, spring_result.plastic_strain
+            );
+            remaining_life = static_cast<int64_t>(
+                std::max(0.0, life * (1.0 - spring_result.cyclic_damage_ratio))
+            );
+        }
+
+        g_ctx->clickhouse->insertCyclicFatigueLog(
+            packet.machine_id,
+            spring_result.cycle_count,
+            spring_result.plastic_strain,
+            g_spring_config.cyclic_state.accumulated_plastic_strain,
+            g_spring_config.cyclic_state.degraded_shear_modulus,
+            g_spring_config.cyclic_state.degraded_yield_strength,
+            spring_result.cyclic_damage_ratio,
+            remaining_life
+        );
 
         if (spring_result.fracture_risk && g_ctx->alert_manager) {
             g_ctx->alert_manager->publishSpringFractureWarning(
@@ -120,6 +194,34 @@ void onSensorDataReceived(const network::SensorDataPacket& packet) {
             ar.actual_range = packet.actual_range;
             ar.predicted_range = range_pred.predicted_range;
             ar.threshold_value = 0.85;
+            ar.cyclic_damage_ratio = spring_result.cyclic_damage_ratio;
+            ar.cycle_count = spring_result.cycle_count;
+            ar.max_mach = range_pred.max_mach;
+            g_ctx->clickhouse->insertAlert(ar);
+        }
+
+        if (spring_result.fatigue_risk && g_ctx->alert_manager) {
+            g_ctx->alert_manager->publishCyclicFatigueWarning(
+                packet.machine_id,
+                spring_result.cycle_count,
+                spring_result.cyclic_damage_ratio,
+                spring_result.plastic_strain,
+                remaining_life
+            );
+            storage::AlertRecord ar;
+            ar.machine_id = packet.machine_id;
+            ar.timestamp = packet.timestamp;
+            ar.alert_type = "cyclic_fatigue_risk";
+            ar.alert_level = spring_result.cyclic_damage_ratio > 0.8 ? "critical" : "warning";
+            ar.message = "循环疲劳风险告警: 累积损伤比超过阈值";
+            ar.torsion_angle = packet.torsion_angle;
+            ar.stored_energy = spring_result.stored_energy;
+            ar.actual_range = packet.actual_range;
+            ar.predicted_range = range_pred.predicted_range;
+            ar.threshold_value = 0.5;
+            ar.cyclic_damage_ratio = spring_result.cyclic_damage_ratio;
+            ar.cycle_count = spring_result.cycle_count;
+            ar.max_mach = range_pred.max_mach;
             g_ctx->clickhouse->insertAlert(ar);
         }
 
@@ -143,17 +245,23 @@ void onSensorDataReceived(const network::SensorDataPacket& packet) {
                 ar.actual_range = packet.actual_range;
                 ar.predicted_range = range_pred.predicted_range;
                 ar.threshold_value = min_required;
+                ar.cyclic_damage_ratio = spring_result.cyclic_damage_ratio;
+                ar.cycle_count = spring_result.cycle_count;
+                ar.max_mach = range_pred.max_mach;
                 g_ctx->clickhouse->insertAlert(ar);
             }
         }
     }
 
     std::cout << "[" << packet.machine_id << "] "
+              << "循环#" << spring_result.cycle_count << " "
               << "扭转角=" << packet.torsion_angle << "rad, "
               << "储能=" << spring_result.stored_energy << "J, "
+              << "损伤比=" << (spring_result.cyclic_damage_ratio * 100) << "%, "
+              << "最大Ma=" << range_pred.max_mach << ", "
               << "预测射程=" << range_pred.predicted_range << "m, "
               << "实际射程=" << packet.actual_range << "m, "
-              << "风险等级=" << risk_level << std::endl;
+              << "风险=" << risk_level << std::endl;
 }
 
 http::HttpResponse handleHealth(const http::HttpRequest&) {
@@ -187,12 +295,20 @@ http::HttpResponse handlePredictRange(const http::HttpRequest& req) {
         json << "\"max_height\":" << result.max_height << ",";
         json << "\"flight_time\":" << result.flight_time << ",";
         json << "\"impact_velocity\":" << result.impact_velocity << ",";
+        json << "\"impact_mach\":" << result.impact_mach << ",";
+        json << "\"max_mach\":" << result.max_mach << ",";
         json << "\"optimal_angle\":" << result.launch_angle_optimal << ",";
         json << "\"trajectory\":[";
         for (size_t i = 0; i < result.trajectory_points.size(); ++i) {
             if (i > 0) json << ",";
             json << "[" << result.trajectory_points[i].first << ","
                  << result.trajectory_points[i].second << "]";
+        }
+        json << "],\"mach_profile\":[";
+        for (size_t i = 0; i < result.mach_profile.size(); ++i) {
+            if (i > 0) json << ",";
+            json << "[" << result.mach_profile[i].first << ","
+                 << result.mach_profile[i].second << "]";
         }
         json << "]}";
         return http::HttpResponse::json(200, json.str());
@@ -207,7 +323,14 @@ http::HttpResponse handleCalculateSpringEnergy(const http::HttpRequest& req) {
         auto it = req.query_params.find("angle");
         if (it != req.query_params.end()) torsion_angle = std::stod(urlDecode(it->second));
 
-        auto result = physics::calculateSpringEnergy(g_spring_config, torsion_angle);
+        physics::SpringEnergyResult result;
+        {
+            std::lock_guard<std::mutex> lock(g_cyclic_state_mutex);
+            result = physics::calculateSpringEnergy(g_spring_config, torsion_angle);
+        }
+
+        double modulus_reduction = g_spring_config.cyclic_state.degraded_shear_modulus
+                                 / g_spring_config.material.shear_modulus;
 
         std::ostringstream json;
         json << "{";
@@ -215,9 +338,17 @@ http::HttpResponse handleCalculateSpringEnergy(const http::HttpRequest& req) {
         json << "\"stored_energy\":" << result.stored_energy << ",";
         json << "\"spring_constant\":" << result.spring_constant << ",";
         json << "\"shear_stress\":" << result.shear_stress << ",";
+        json << "\"elastic_stress\":" << result.elastic_stress << ",";
+        json << "\"plastic_strain\":" << result.plastic_strain << ",";
         json << "\"efficiency\":" << result.efficiency << ",";
         json << "\"yield_strength_ratio\":" << result.yield_strength_ratio << ",";
-        json << "\"fracture_risk\":" << (result.fracture_risk ? "true" : "false");
+        json << "\"cycle_count\":" << result.cycle_count << ",";
+        json << "\"cyclic_damage_ratio\":" << result.cyclic_damage_ratio << ",";
+        json << "\"modulus_reduction\":" << modulus_reduction << ",";
+        json << "\"back_stress\":" << g_spring_config.cyclic_state.back_stress << ",";
+        json << "\"degraded_yield_strength\":" << g_spring_config.cyclic_state.degraded_yield_strength << ",";
+        json << "\"fracture_risk\":" << (result.fracture_risk ? "true" : "false") << ",";
+        json << "\"fatigue_risk\":" << (result.fatigue_risk ? "true" : "false");
         json << "}";
         return http::HttpResponse::json(200, json.str());
     } catch (const std::exception& e) {
@@ -252,7 +383,16 @@ http::HttpResponse handleGetSensorData(const http::HttpRequest& req) {
              << "\"projectile_mass\":" << data[i].projectile_mass << ","
              << "\"launch_angle\":" << data[i].launch_angle << ","
              << "\"spring_status\":\"" << data[i].spring_status << "\","
-             << "\"risk_level\":\"" << data[i].risk_level << "\""
+             << "\"risk_level\":\"" << data[i].risk_level << "\","
+             << "\"shear_stress\":" << data[i].shear_stress << ","
+             << "\"elastic_stress\":" << data[i].elastic_stress << ","
+             << "\"plastic_strain\":" << data[i].plastic_strain << ","
+             << "\"cycle_count\":" << data[i].cycle_count << ","
+             << "\"cyclic_damage_ratio\":" << data[i].cyclic_damage_ratio << ","
+             << "\"modulus_reduction\":" << data[i].modulus_reduction << ","
+             << "\"max_mach\":" << data[i].max_mach << ","
+             << "\"compressibility_correction\":" << data[i].compressibility_correction << ","
+             << "\"fatigue_risk\":" << static_cast<int>(data[i].fatigue_risk)
              << "}";
     }
     json << "]}";
@@ -284,7 +424,10 @@ http::HttpResponse handleGetAlerts(const http::HttpRequest& req) {
              << "\"stored_energy\":" << alerts[i].stored_energy << ","
              << "\"actual_range\":" << alerts[i].actual_range << ","
              << "\"predicted_range\":" << alerts[i].predicted_range << ","
-             << "\"threshold_value\":" << alerts[i].threshold_value
+             << "\"threshold_value\":" << alerts[i].threshold_value << ","
+             << "\"cyclic_damage_ratio\":" << alerts[i].cyclic_damage_ratio << ","
+             << "\"cycle_count\":" << alerts[i].cycle_count << ","
+             << "\"max_mach\":" << alerts[i].max_mach
              << "}";
     }
     json << "]}";
@@ -308,6 +451,9 @@ http::HttpResponse handleGetMachineStatus(const http::HttpRequest&) {
              << "\"last_actual_range\":" << statuses[i].last_actual_range << ","
              << "\"last_predicted_range\":" << statuses[i].last_predicted_range << ","
              << "\"current_risk_level\":\"" << statuses[i].current_risk_level << "\","
+             << "\"total_cycles\":" << statuses[i].total_cycles << ","
+             << "\"current_damage_ratio\":" << statuses[i].current_damage_ratio << ","
+             << "\"last_max_mach\":" << statuses[i].last_max_mach << ","
              << "\"unacknowledged_alerts\":" << statuses[i].unacknowledged_alerts
              << "}";
     }
@@ -337,10 +483,12 @@ int main(int argc, char* argv[]) {
     g_spring_config.coil_mean_diameter = 0.15;
     g_spring_config.active_coils = 12;
     g_spring_config.material = physics::STEEL_65MN;
+    g_spring_config.cyclic_state = physics::initializeCyclicState(g_spring_config.material);
 
     g_projectile_config.mass = 10.0;
-    g_projectile_config.drag_coefficient = 0.47;
+    g_projectile_config.drag_coefficient_incompressible = 0.47;
     g_projectile_config.cross_section_area = 0.0314;
+    g_projectile_config.diameter = 0.2;
 
     signal(SIGINT, signalHandler);
 #ifdef SIGTERM
