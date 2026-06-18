@@ -1,4 +1,6 @@
 #include "spring_simulator_module.h"
+#include "logger.h"
+#include "metrics_collector.h"
 
 #include <fstream>
 #include <sstream>
@@ -161,6 +163,7 @@ bool SpringSimulatorModule::consumeSensorMessage(bus::SensorRawMessage& raw) {
 bool SpringSimulatorModule::computeSpringEnergy(bus::SensorRawMessage& raw,
                                                 MachineCyclicState& state,
                                                 bus::SpringResultMessage& out) {
+    auto t0 = std::chrono::steady_clock::now();
     double shear_stress_pa = physics::calculateShearStress(physics_config_, raw.torsion_angle_rad);
     physics_config_.cyclic_state = state.cyclic;
     physics::updateCyclicSoftening(physics_config_, raw.torsion_angle_rad, shear_stress_pa);
@@ -192,6 +195,34 @@ bool SpringSimulatorModule::computeSpringEnergy(bus::SensorRawMessage& raw,
     } else {
         out.risk = bus::RiskLevel::INFO;
     }
+
+    MetricLabels labels;
+    labels.machine_id = raw.getMachineId();
+    labels.material = physics_config_.material_key;
+    labels.active_coils = std::to_string(physics_config_.active_coils);
+
+    MetricsCollector::instance().setSpringStoredEnergy(energy.stored_energy, labels);
+    MetricsCollector::instance().setSpringEfficiency(energy.efficiency, labels);
+    MetricsCollector::instance().setSpringShearStress(energy.shear_stress, labels);
+    MetricsCollector::instance().setSpringModulusReduction(energy.modulus_reduction, labels);
+    MetricsCollector::instance().setSpringCycleCount(state.cyclic.cycle_count, labels);
+    MetricsCollector::instance().setSpringCyclicDamage(energy.cyclic_damage_ratio, labels);
+
+    auto t1 = std::chrono::steady_clock::now();
+    double latency = std::chrono::duration<double>(t1 - t0).count();
+    MetricsCollector::instance().observeLatency("spring_simulator.compute", latency);
+
+    if (out.risk >= bus::RiskLevel::WARNING) {
+        LOG_WARN("spring_simulator",
+                 "机器[{}] 告警: 屈服比={:.4f}, 损伤比={:.4f}, 循环={}, 储能={:.1f}J",
+                 raw.getMachineId(), energy.yield_strength_ratio,
+                 energy.cyclic_damage_ratio, state.cyclic.cycle_count, energy.stored_energy);
+    }
+
+    if (processed_ % 1000 == 0) {
+        LOG_INFO("spring_simulator", "已处理 {} 条, 告警 {} 条", processed_.load(), alerts_.load());
+    }
+
     return true;
 }
 
@@ -222,6 +253,13 @@ bool SpringSimulatorModule::detectAndEmitAlerts(const std::string& machine_id,
         if (bus_ && bus_->push(bus::QueueChannel::SPRING_TO_ALARM, a)) {
             alerts_++;
             emitted = true;
+            MetricsCollector::instance().incrementAlertsEmitted(
+                "spring_fracture",
+                a.level == bus::RiskLevel::CRITICAL ? "critical" : "warning");
+            LOG_WARN("spring_simulator", "触发弹簧断裂告警: machine_id={}, level={}, ratio={:.4f}",
+                     machine_id,
+                     a.level == bus::RiskLevel::CRITICAL ? "CRITICAL" : "WARNING",
+                     result.yield_strength_ratio);
         }
     }
 
@@ -247,6 +285,11 @@ bool SpringSimulatorModule::detectAndEmitAlerts(const std::string& machine_id,
         if (bus_ && bus_->push(bus::QueueChannel::SPRING_TO_ALARM, a)) {
             alerts_++;
             emitted = true;
+            MetricsCollector::instance().incrementAlertsEmitted(
+                "cyclic_fatigue",
+                a.level == bus::RiskLevel::CRITICAL ? "critical" : "warning");
+            LOG_WARN("spring_simulator", "触发疲劳告警: machine_id={}, damage={:.4f}, remaining={}",
+                     machine_id, result.cyclic_damage_ratio, remaining);
         }
     }
     return emitted;

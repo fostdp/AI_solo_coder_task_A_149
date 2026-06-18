@@ -64,6 +64,9 @@ private:
     bool parseRequest(const std::string& raw_request, HttpRequest& out_req);
     void parseQueryString(const std::string& query, std::map<std::string, std::string>& out);
     HttpResponse routeRequest(const HttpRequest& req);
+    HttpResponse serveStaticFile(const HttpRequest& req, const std::string& url_path);
+    static std::string getMimeType(const std::string& path);
+    static bool acceptsGzip(const HttpRequest& req);
 
     std::atomic<bool> running_;
     std::thread server_thread_;

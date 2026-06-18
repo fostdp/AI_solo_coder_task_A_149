@@ -17,6 +17,8 @@
 #include "udp_sensor_receiver.h"
 #include "mqtt_alert_manager.h"
 #include "http_api_server.h"
+#include "logger.h"
+#include "metrics_collector.h"
 
 namespace physics_ns = trebuchet::physics;
 namespace alert_ns = trebuchet::alert;
@@ -78,28 +80,27 @@ static void periodicStatusLogger(
             if (!g_running) return;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        std::lock_guard<std::mutex> lock(g_stdout_mutex);
-        std::cout << "[status] udp recv=" << udp->totalReceived()
-                  << " ok=" << udp->totalValidatedOk()
-                  << " drop=" << udp->totalDroppedInvalid()
-                  << " | spring proc=" << spr->messagesProcessed()
-                  << " alerts=" << spr->alertsEmitted()
-                  << " to_storage=" << spr->storageDispatches()
-                  << " | range preds=" << rng->predictionsMade()
-                  << " | mqtt ok=" << alm->alertsPublishedOk()
-                  << " fail=" << alm->alertsPublishFailed()
-                  << " dedup=" << alm->alertsDeduped()
-                  << " | bus_dropped=" << udp->totalBusDropped() + bus->dropped()
-                  << std::endl;
+        LOG_INFO("status", "udp recv={} ok={} drop={} | spring proc={} alerts={} to_storage={} | range preds={} | mqtt ok={} fail={} dedup={} | bus_dropped={}",
+                 udp->totalReceived(), udp->totalValidatedOk(), udp->totalDroppedInvalid(),
+                 spr->messagesProcessed(), spr->alertsEmitted(), spr->storageDispatches(),
+                 rng->predictionsMade(),
+                 alm->alertsPublishedOk(), alm->alertsPublishFailed(), alm->alertsDeduped(),
+                 udp->totalBusDropped() + bus->dropped());
     }
 }
 
 int main(int argc, char* argv[]) {
     using namespace trebuchet::modules;
     using namespace trebuchet::bus;
+    using namespace trebuchet::metrics;
+    using namespace trebuchet;
 
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+
+    Logger::init("logs", "trebuchet.log",
+                 LogLevel::INFO, LogLevel::DEBUG);
+    MetricsCollector::instance().init(8081, "0.0.0.0");
 
     printBanner();
 
@@ -125,6 +126,11 @@ int main(int argc, char* argv[]) {
         else if (k == "--traj-config") traj_config_path = v;
     }
 
+    LOG_INFO("main", "Starting Trebuchet Sim Backend v2");
+    LOG_INFO("main", "UDP port={}, HTTP port={}, Metrics port=8081", udp_port, http_port);
+    LOG_INFO("main", "MQTT broker={}:{}, ClickHouse={}:{}",
+             mqtt_host, mqtt_port, clickhouse_host, clickhouse_port);
+
     auto spring_cfg = makeDefaultSpringConfig();
     auto proj_cfg = makeDefaultProjectileConfig();
 
@@ -135,22 +141,28 @@ int main(int argc, char* argv[]) {
     UdpReceiverModule udp_mod(udp_cfg, &bus);
     if (!spring_config_path.empty()) {
         spring_cfg = makeDefaultSpringConfig();
-        std::cout << "[init] --spring-config file provided; loading via module API" << std::endl;
+        LOG_INFO("main", "--spring-config file provided; loading via module API");
     }
     SpringSimulatorModule::Config spring_cfg_mod;
     SpringSimulatorModule spring_mod(spring_cfg_mod, spring_cfg, &bus);
     if (!spring_config_path.empty()) {
         bool ok = spring_mod.loadSpringParamsFromJson(spring_config_path);
-        std::cout << "[init] spring config load " << (ok ? "OK" : "FAILED")
-                  << " : " << spring_config_path << std::endl;
+        if (ok) {
+            LOG_INFO("main", "spring config load OK: {}", spring_config_path);
+        } else {
+            LOG_ERROR("main", "spring config load FAILED: {}", spring_config_path);
+        }
     }
 
     RangePredictorModule::Config range_cfg;
     RangePredictorModule range_mod(range_cfg, proj_cfg, &bus);
     if (!traj_config_path.empty()) {
         bool ok = range_mod.loadTrajectoryParamsFromJson(traj_config_path);
-        std::cout << "[init] trajectory config load " << (ok ? "OK" : "FAILED")
-                  << " : " << traj_config_path << std::endl;
+        if (ok) {
+            LOG_INFO("main", "trajectory config load OK: {}", traj_config_path);
+        } else {
+            LOG_ERROR("main", "trajectory config load FAILED: {}", traj_config_path);
+        }
     }
 
     AlarmMqttModule::Config alarm_cfg;
@@ -158,51 +170,45 @@ int main(int argc, char* argv[]) {
     alarm_cfg.mqtt_port = mqtt_port;
     AlarmMqttModule alarm_mod(alarm_cfg, &bus);
 
-    std::cout << "[init] starting modules..." << std::endl;
+    LOG_INFO("main", "starting modules...");
     if (!udp_mod.start()) {
-        std::cerr << "[fatal] UDP receiver failed to bind port " << udp_port << std::endl;
+        LOG_CRITICAL("main", "UDP receiver failed to bind port {}", udp_port);
         return 1;
     }
-    std::cout << "[init]   UDP receiver on : " << udp_port << " OK" << std::endl;
+    LOG_INFO("main", "  UDP receiver on : {} OK", udp_port);
 
     spring_mod.start();
-    std::cout << "[init]   Spring simulator OK" << std::endl;
+    LOG_INFO("main", "  Spring simulator OK");
 
     range_mod.start();
-    std::cout << "[init]   Range predictor OK" << std::endl;
+    LOG_INFO("main", "  Range predictor OK");
 
     bool mqtt_ok = alarm_mod.start();
-    std::cout << "[init]   MQTT alarm module: "
-              << (mqtt_ok ? "connected" : "standalone (no broker)") << std::endl;
+    LOG_INFO("main", "  MQTT alarm module: {}", (mqtt_ok ? "connected" : "standalone (no broker)"));
 
     auto status_cfg = spring_mod.getSpringConfig();
     auto proj_cfg_out = range_mod.getProjectileConfig();
-    std::cout << "[init] spring: d=" << status_cfg.wire_diameter * 1000 << "mm"
-              << " D=" << status_cfg.coil_mean_diameter * 1000 << "mm"
-              << " Na=" << status_cfg.active_coils
-              << " G=" << status_cfg.material.shear_modulus * 1e-9 << "GPa"
-              << std::endl;
-    std::cout << "[init] projectile: m=" << proj_cfg_out.mass << "kg"
-              << " Cd0=" << proj_cfg_out.drag_coefficient_incompressible
-              << " A=" << proj_cfg_out.cross_section_area << "m2"
-              << std::endl;
+    LOG_INFO("main", "spring: d={}mm D={}mm Na={} G={}GPa",
+             status_cfg.wire_diameter * 1000,
+             status_cfg.coil_mean_diameter * 1000,
+             status_cfg.active_coils,
+             status_cfg.material.shear_modulus * 1e-9);
+    LOG_INFO("main", "projectile: m={}kg Cd0={} A={}m2",
+             proj_cfg_out.mass,
+             proj_cfg_out.drag_coefficient_incompressible,
+             proj_cfg_out.cross_section_area);
 
     std::thread status_thread(periodicStatusLogger,
                               &udp_mod, &spring_mod, &range_mod, &alarm_mod, &bus);
 
-    std::cout << "[init] all modules online. press Ctrl+C to stop." << std::endl;
+    LOG_INFO("main", "all modules online. press Ctrl+C to stop.");
 
     udp_mod.setPacketHandler([](const SensorRawMessage& msg, bool valid) {
         if (!valid) return;
-        std::lock_guard<std::mutex> l(g_stdout_mutex);
         if (msg.cycle_count > 0 && (msg.cycle_count % 50 == 0)) {
-            std::cout << "[sensor] " << msg.getMachineId()
-                      << " cycle=" << msg.cycle_count
-                      << " theta=" << msg.torsion_angle_rad
-                      << " rad, E=" << msg.stored_energy_j
-                      << " J, damage=" << msg.cyclic_damage_ratio
-                      << " Ma_max=" << msg.max_mach
-                      << std::endl;
+            LOG_INFO("sensor", "{} cycle={} theta={} rad, E={} J, damage={}, Ma_max={}",
+                     msg.getMachineId(), msg.cycle_count, msg.torsion_angle_rad,
+                     msg.stored_energy_j, msg.cyclic_damage_ratio, msg.max_mach);
         }
     });
 
@@ -211,9 +217,9 @@ int main(int argc, char* argv[]) {
     http_cfg.static_files_dir = "frontend";
     http_ns::HttpApiServer http_srv(http_cfg);
     if (http_srv.start()) {
-        std::cout << "[init] HTTP API server on : " << http_port << std::endl;
+        LOG_INFO("main", "HTTP API server on : {}", http_port);
     } else {
-        std::cerr << "[warn] HTTP API server failed to start" << std::endl;
+        LOG_WARN("main", "HTTP API server failed to start");
     }
 
     try {
@@ -222,34 +228,35 @@ int main(int argc, char* argv[]) {
         ch_cfg.port = clickhouse_port;
         storage_ns::ClickHouseClient ch(ch_cfg);
         if (ch.connect()) {
-            std::cout << "[init] ClickHouse OK at "
-                      << clickhouse_host << ":" << clickhouse_port << std::endl;
+            LOG_INFO("main", "ClickHouse OK at {}:{}", clickhouse_host, clickhouse_port);
         } else {
-            std::cerr << "[warn] ClickHouse unavailable" << std::endl;
+            LOG_WARN("main", "ClickHouse unavailable at {}:{}", clickhouse_host, clickhouse_port);
         }
     } catch (...) {
-        std::cerr << "[warn] ClickHouse client exception" << std::endl;
+        LOG_WARN("main", "ClickHouse client exception");
     }
 
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    std::cout << "\n[shutdown] signal received, stopping modules..." << std::endl;
+    LOG_INFO("main", "signal received, stopping modules...");
 
     udp_mod.stop();
-    std::cout << "[shutdown]   UDP stopped" << std::endl;
+    LOG_INFO("main", "  UDP stopped");
     spring_mod.stop();
-    std::cout << "[shutdown]   Spring stopped" << std::endl;
+    LOG_INFO("main", "  Spring stopped");
     range_mod.stop();
-    std::cout << "[shutdown]   Range stopped" << std::endl;
+    LOG_INFO("main", "  Range stopped");
     alarm_mod.stop();
-    std::cout << "[shutdown]   Alarm stopped" << std::endl;
+    LOG_INFO("main", "  Alarm stopped");
     http_srv.stop();
-    std::cout << "[shutdown]   HTTP stopped" << std::endl;
+    LOG_INFO("main", "  HTTP stopped");
+    MetricsCollector::instance().shutdown();
+    Logger::flush();
 
     if (status_thread.joinable()) status_thread.join();
 
-    std::cout << "[shutdown] good-bye." << std::endl;
+    LOG_INFO("main", "good-bye.");
     return 0;
 }

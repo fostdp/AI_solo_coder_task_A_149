@@ -4,6 +4,11 @@
 #include <cstring>
 #include <iostream>
 #include <algorithm>
+#include <fstream>
+#include <filesystem>
+#include <cctype>
+
+namespace fs = std::filesystem;
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -132,6 +137,26 @@ bool HttpApiServer::start() {
 #endif
 
     running_ = true;
+
+    addGetRoute("/health", [](const HttpRequest&) {
+        std::ostringstream json;
+        json << "{\"status\":\"ok\",\"timestamp\":"
+             << std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()
+             << ",\"version\":\"2.0.0\"}";
+        return HttpResponse::json(200, json.str());
+    });
+
+    if (!impl_->config.static_files_dir.empty()) {
+        addGetRoute("/", [this](const HttpRequest& req) {
+            return serveStaticFile(req, "/index.html");
+        });
+
+        setNotFoundHandler([this](const HttpRequest& req) {
+            return serveStaticFile(req, req.path);
+        });
+    }
+
     server_thread_ = std::thread(&HttpApiServer::serverLoop, this);
     return true;
 }
@@ -280,6 +305,107 @@ HttpResponse HttpApiServer::routeRequest(const HttpRequest& req) {
     }
     if (not_found_handler_) return not_found_handler_(req);
     return HttpResponse::error(404, "Not Found");
+}
+
+std::string HttpApiServer::getMimeType(const std::string& path) {
+    static const std::unordered_map<std::string, std::string> mime_types = {
+        {".html", "text/html; charset=utf-8"},
+        {".htm",  "text/html; charset=utf-8"},
+        {".js",   "application/javascript; charset=utf-8"},
+        {".mjs",  "application/javascript; charset=utf-8"},
+        {".css",  "text/css; charset=utf-8"},
+        {".json", "application/json; charset=utf-8"},
+        {".svg",  "image/svg+xml"},
+        {".png",  "image/png"},
+        {".jpg",  "image/jpeg"},
+        {".jpeg", "image/jpeg"},
+        {".gif",  "image/gif"},
+        {".ico",  "image/x-icon"},
+        {".map",  "application/json; charset=utf-8"},
+        {".txt",  "text/plain; charset=utf-8"},
+        {".woff", "font/woff"},
+        {".woff2","font/woff2"},
+        {".ttf",  "font/ttf"},
+        {".eot",  "application/vnd.ms-fontobject"}
+    };
+    size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos) return "application/octet-stream";
+    std::string ext = path.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    auto it = mime_types.find(ext);
+    return it != mime_types.end() ? it->second : "application/octet-stream";
+}
+
+bool HttpApiServer::acceptsGzip(const HttpRequest& req) {
+    auto it = req.headers.find("Accept-Encoding");
+    if (it == req.headers.end()) {
+        it = req.headers.find("accept-encoding");
+    }
+    if (it == req.headers.end()) return false;
+    return it->second.find("gzip") != std::string::npos;
+}
+
+HttpResponse HttpApiServer::serveStaticFile(const HttpRequest& req, const std::string& url_path) {
+    if (url_path.empty() || url_path[0] != '/') {
+        return HttpResponse::error(400, "Bad Request");
+    }
+
+    std::string clean_path = url_path;
+    while (clean_path.size() > 1 && clean_path[1] == '/') {
+        clean_path.erase(0, 1);
+    }
+    if (clean_path.find("..") != std::string::npos) {
+        return HttpResponse::error(403, "Forbidden");
+    }
+
+    fs::path base_dir = impl_->config.static_files_dir;
+    fs::path file_path = base_dir / fs::path(clean_path.substr(1));
+
+    if (fs::is_directory(file_path)) {
+        file_path /= "index.html";
+    }
+
+    if (!fs::exists(file_path) || !fs::is_regular_file(file_path)) {
+        return HttpResponse::error(404, "Not Found");
+    }
+
+    bool use_gzip = acceptsGzip(req);
+    fs::path gz_path = file_path;
+    gz_path += ".gz";
+
+    std::string final_path = file_path.string();
+    HttpResponse resp;
+    resp.status_code = 200;
+    resp.status_text = "OK";
+    resp.headers["Content-Type"] = getMimeType(file_path.string());
+    resp.headers["Cache-Control"] = "public, max-age=3600";
+
+    if (use_gzip && fs::exists(gz_path) && fs::is_regular_file(gz_path)) {
+        final_path = gz_path.string();
+        resp.headers["Content-Encoding"] = "gzip";
+        resp.headers["Vary"] = "Accept-Encoding";
+    }
+
+    std::ifstream file(final_path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return HttpResponse::error(500, "Internal Server Error");
+    }
+
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    resp.body.resize(static_cast<size_t>(size));
+    if (!file.read(resp.body.data(), size)) {
+        return HttpResponse::error(500, "Internal Server Error");
+    }
+
+    resp.headers["Content-Length"] = std::to_string(resp.body.size());
+    resp.headers["Last-Modified"] = "Thu, 01 Jan 1970 00:00:00 GMT";
+    resp.headers["X-Content-Type-Options"] = "nosniff";
+    resp.headers["X-Frame-Options"] = "DENY";
+
+    return resp;
 }
 
 }

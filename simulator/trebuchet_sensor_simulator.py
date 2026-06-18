@@ -9,13 +9,36 @@ import sys
 from datetime import datetime
 
 
-SHEAR_MODULUS = 79.3e9
-YIELD_STRENGTH = 785e6
-DENSITY = 7850.0
-FATIGUE_DUCTILITY_COEFF = 0.42
-FATIGUE_DUCTILITY_EXP = -0.58
-CYCLIC_STRENGTH_COEFF = 1300e6
-CYCLIC_STRENGTH_EXP = -0.10
+MATERIAL_LIBRARY = {
+    "65mn": {
+        "shear_modulus": 79.3e9,
+        "yield_strength": 785e6,
+        "density": 7850.0,
+        "fatigue_ductility_coeff": 0.42,
+        "fatigue_ductility_exp": -0.58,
+        "cyclic_strength_coeff": 1300e6,
+        "cyclic_strength_exp": -0.10,
+        "name": "65Mn Spring Steel"
+    },
+    "50crva": {
+        "shear_modulus": 79.0e9,
+        "yield_strength": 1177e6,
+        "density": 7850.0,
+        "fatigue_ductility_coeff": 0.38,
+        "fatigue_ductility_exp": -0.62,
+        "cyclic_strength_coeff": 1500e6,
+        "cyclic_strength_exp": -0.12,
+        "name": "50CrVA Spring Steel"
+    }
+}
+
+SHEAR_MODULUS = MATERIAL_LIBRARY["65mn"]["shear_modulus"]
+YIELD_STRENGTH = MATERIAL_LIBRARY["65mn"]["yield_strength"]
+DENSITY = MATERIAL_LIBRARY["65mn"]["density"]
+FATIGUE_DUCTILITY_COEFF = MATERIAL_LIBRARY["65mn"]["fatigue_ductility_coeff"]
+FATIGUE_DUCTILITY_EXP = MATERIAL_LIBRARY["65mn"]["fatigue_ductility_exp"]
+CYCLIC_STRENGTH_COEFF = MATERIAL_LIBRARY["65mn"]["cyclic_strength_coeff"]
+CYCLIC_STRENGTH_EXP = MATERIAL_LIBRARY["65mn"]["cyclic_strength_exp"]
 GRAVITY = 9.80665
 AIR_DENSITY = 1.225
 DRAG_COEFFICIENT_INCOMPRESSIBLE = 0.47
@@ -105,16 +128,23 @@ def calculate_coffin_manson_life(plastic_strain_amplitude):
 
 
 class CyclicSofteningState:
-    def __init__(self):
+    def __init__(self, material_key="65mn"):
+        self.material_key = material_key
+        mat = MATERIAL_LIBRARY[material_key]
         self.cycle_count = 0
         self.accumulated_plastic_strain = 0.0
-        self.degraded_shear_modulus = SHEAR_MODULUS
-        self.degraded_yield_strength = YIELD_STRENGTH
+        self.degraded_shear_modulus = mat["shear_modulus"]
+        self.degraded_yield_strength = mat["yield_strength"]
         self.back_stress = 0.0
         self.kinematic_hardening = 0.0
         self.current_damage_parameter = 0.0
+        self.fatigue_ductility_coeff = mat["fatigue_ductility_coeff"]
+        self.fatigue_ductility_exp = mat["fatigue_ductility_exp"]
+        self.cyclic_strength_coeff = mat["cyclic_strength_coeff"]
+        self.cyclic_strength_exp = mat["cyclic_strength_exp"]
 
     def update(self, torsion_angle_rad, shear_stress_amplitude, wire_d, coil_D, active_coils):
+        mat = MATERIAL_LIBRARY[self.material_key]
         self.cycle_count += 1
         tau_eff = abs(shear_stress_amplitude - self.back_stress)
         tau_y = self.degraded_yield_strength
@@ -126,19 +156,30 @@ class CyclicSofteningState:
                  D1_KINEMATIC * self.back_stress * abs(plastic_inc)
             self.back_stress += dx
             dq = 0.3 * Q_SAT_SOFTENING * (1.0 - math.exp(-B_SOFTENING * abs(plastic_inc)))
-            self.degraded_yield_strength = max(YIELD_STRENGTH * 0.5,
+            self.degraded_yield_strength = max(mat["yield_strength"] * 0.5,
                                                 self.degraded_yield_strength - dq)
 
         self.accumulated_plastic_strain += abs(plastic_inc)
         if self.accumulated_plastic_strain > 1e-9:
-            ratio = self.degraded_yield_strength / YIELD_STRENGTH
-            self.degraded_shear_modulus = SHEAR_MODULUS * max(
+            ratio = self.degraded_yield_strength / mat["yield_strength"]
+            self.degraded_shear_modulus = mat["shear_modulus"] * max(
                 0.55, math.exp(-0.15 * self.accumulated_plastic_strain / ratio)
             )
         if plastic_inc > 1e-12:
-            nf = calculate_coffin_manson_life(plastic_inc)
+            nf = self.calculate_coffin_manson_life(plastic_inc)
             self.current_damage_parameter += 1.0 / max(1.0, nf)
         self.current_damage_parameter = min(1.5, self.current_damage_parameter)
+
+    def calculate_coffin_manson_life(self, plastic_strain_amplitude):
+        if plastic_strain_amplitude <= 0:
+            return 1e12
+        mat = MATERIAL_LIBRARY[self.material_key]
+        elastic_term = (self.cyclic_strength_coeff / self.degraded_shear_modulus) * \
+                       ((2.0 * plastic_strain_amplitude) ** self.cyclic_strength_exp)
+        plastic_term = self.fatigue_ductility_coeff * \
+                       ((2.0 * plastic_strain_amplitude) ** self.fatigue_ductility_exp)
+        total = max(1e-12, abs(elastic_term + plastic_term))
+        return 1.0 / total
 
     @property
     def fatigue_risk(self):
@@ -146,11 +187,13 @@ class CyclicSofteningState:
 
 
 class SpringSimulator:
-    def __init__(self, wire_diameter=0.02, coil_mean_diameter=0.15, active_coils=12):
+    def __init__(self, wire_diameter=0.02, coil_mean_diameter=0.15, active_coils=12,
+                 material_key="65mn"):
         self.d = wire_diameter
         self.D = coil_mean_diameter
         self.Na = active_coils
-        self.cyclic = CyclicSofteningState()
+        self.material_key = material_key
+        self.cyclic = CyclicSofteningState(material_key)
 
     def calculate_shear_stress(self, torsion_angle_rad):
         G = self.cyclic.degraded_shear_modulus
@@ -170,7 +213,8 @@ class SpringSimulator:
 
     def calculate_release_velocity(self, torsion_angle_rad, projectile_mass, efficiency=0.85):
         energy, k_spring, tau = self.calculate_stored_energy(torsion_angle_rad)
-        eff = efficiency * (0.7 + 0.3 * (self.cyclic.degraded_shear_modulus / SHEAR_MODULUS))
+        mat = MATERIAL_LIBRARY[self.material_key]
+        eff = efficiency * (0.7 + 0.3 * (self.cyclic.degraded_shear_modulus / mat["shear_modulus"]))
         usable = energy * eff
         return math.sqrt(2.0 * usable / projectile_mass), k_spring, tau
 
@@ -221,25 +265,47 @@ class ProjectileSimulator:
 
 class TrebuchetSensorSimulator:
     def __init__(self, machine_id, server_host="127.0.0.1", server_port=9000,
-                 interval_sec=60, projectile_mass=10.0):
+                 interval_ms=60000, projectile_mass=10.0, launch_angle_deg=None,
+                 wire_diameter_mm=20.0, coil_mean_diameter_mm=150.0,
+                 active_coils=12, material_key="65mn",
+                 fixed_parameters=False):
         self.machine_id = machine_id
         self.server_host = server_host
         self.server_port = server_port
-        self.interval_sec = interval_sec
+        self.interval_sec = interval_ms / 1000.0
+        self.interval_ms = interval_ms
         self.projectile_mass = projectile_mass
-        self.spring = SpringSimulator()
-        self.projectile = ProjectileSimulator(mass=projectile_mass)
+        self.launch_angle_deg = launch_angle_deg
+        self.wire_d = wire_diameter_mm / 1000.0
+        self.coil_mean_diameter_m = coil_mean_diameter_mm / 1000.0
+        self.active_coils = active_coils
+        self.material_key = material_key
+        self.fixed_parameters = fixed_parameters
+        self.spring = SpringSimulator(
+            wire_diameter=self.wire_d,
+            coil_mean_diameter=self.coil_mean_diameter_m,
+            active_coils=active_coils,
+            material_key=material_key
+        )
+        cross_section_area = math.pi * (self.coil_mean_diameter_m / 2.0) ** 2
+        self.projectile = ProjectileSimulator(
+            mass=projectile_mass,
+            cross_section_area=cross_section_area,
+            diameter=self.coil_mean_diameter_m
+        )
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.running = False
         self.torsion_angle = 0.0
         self.max_torsion = math.radians(175)
         self.base_torsion = math.radians(120)
+        self._status_counter = 0
 
     def generate_reading(self):
         noise = random.uniform(-0.02, 0.02) * self.base_torsion
         self.torsion_angle = self.base_torsion + noise
 
-        if self.spring.cyclic.cycle_count > 0 and self.spring.cyclic.cycle_count % 50 == 0:
+        self._status_counter += 1
+        if self.spring.cyclic.cycle_count > 0 and self._status_counter % 50 == 0:
             self.torsion_angle *= random.uniform(1.08, 1.2)
 
         efficiency = 0.78 + random.uniform(-0.04, 0.04)
@@ -249,7 +315,12 @@ class TrebuchetSensorSimulator:
         release_velocity, _, _ = self.spring.calculate_release_velocity(
             self.torsion_angle, self.projectile_mass, efficiency
         )
-        launch_angle = 45.0 + random.uniform(-3, 3)
+
+        if self.launch_angle_deg is not None and self.fixed_parameters:
+            launch_angle = float(self.launch_angle_deg)
+        else:
+            launch_angle = 45.0 + random.uniform(-3, 3)
+
         actual_range, max_mach, comp_corr = self.projectile.calculate_range(
             release_velocity, launch_angle, random.uniform(0.92, 1.08)
         )
@@ -257,7 +328,8 @@ class TrebuchetSensorSimulator:
             release_velocity, launch_angle, 1.0
         )
 
-        modulus_reduction = self.spring.cyclic.degraded_shear_modulus / SHEAR_MODULUS
+        mat = MATERIAL_LIBRARY[self.material_key]
+        modulus_reduction = self.spring.cyclic.degraded_shear_modulus / mat["shear_modulus"]
         efficiency *= max(0.65, modulus_reduction)
 
         return {
@@ -309,8 +381,17 @@ class TrebuchetSensorSimulator:
 
     def run(self):
         self.running = True
+        mat_info = MATERIAL_LIBRARY[self.material_key]["name"]
         print(f"[{self.machine_id}] 传感器模拟器启动 (目标: {self.server_host}:{self.server_port})")
-        print(f"[{self.machine_id}] 上报间隔: {self.interval_sec}秒")
+        print(f"[{self.machine_id}] 上报间隔: {self.interval_ms}ms ({self.interval_sec:.3f}s)")
+        print(f"[{self.machine_id}] 弹丸重量: {self.projectile_mass:.2f} kg")
+        if self.launch_angle_deg is not None and self.fixed_parameters:
+            print(f"[{self.machine_id}] 发射仰角: {self.launch_angle_deg:.1f}° (固定)")
+        else:
+            print(f"[{self.machine_id}] 发射仰角: 45° ± 3° (随机)")
+        print(f"[{self.machine_id}] 弹簧参数: 线径={self.wire_d*1000:.1f}mm, "
+              f"中径={self.coil_mean_diameter_m*1000:.1f}mm, "
+              f"有效圈数={self.active_coils}, 材料={mat_info}")
         try:
             while self.running:
                 reading = self.generate_reading()
@@ -320,6 +401,7 @@ class TrebuchetSensorSimulator:
                           f"储能={reading['stored_energy']:.1f}J "
                           f"初速={reading['release_velocity']:.2f}m/s "
                           f"Ma={reading['max_mach']:.2f} "
+                          f"仰角={reading['launch_angle']:.1f}° "
                           f"射程={reading['actual_range']:.1f}m "
                           f"损伤={(reading['cyclic_damage_ratio']*100):.2f}% "
                           f"效率={reading['efficiency']*100:.1f}%")
@@ -333,30 +415,94 @@ class TrebuchetSensorSimulator:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="霹雳车UDP传感器模拟器")
-    parser.add_argument("--host", default="127.0.0.1", help="后端服务器地址")
-    parser.add_argument("--port", type=int, default=9000, help="后端UDP端口")
-    parser.add_argument("--interval", type=int, default=60, help="上报间隔(秒)")
-    parser.add_argument("--machines", type=int, default=3, help="模拟霹雳车数量")
-    parser.add_argument("--mass", type=float, default=10.0, help="弹丸质量(kg)")
+    parser = argparse.ArgumentParser(
+        description="霹雳车UDP传感器模拟器 - 扭力弹簧储能仿真",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python trebuchet_sensor_simulator.py --mass-kg 15.0 --launch-angle-deg 45 --interval-ms 1000
+  python trebuchet_sensor_simulator.py --machines 5 --wire-diameter-mm 22 --material 50crva
+  python trebuchet_sensor_simulator.py --host 192.168.1.100 --port 9000 --mass-kg 8.5
+        """
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="后端服务器地址 (默认: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=9000, help="后端UDP端口 (默认: 9000)")
+    parser.add_argument("--machines", type=int, default=3, help="模拟霹雳车数量 (默认: 3)")
+
+    parser.add_argument("--mass-kg", type=float, default=10.0,
+                        help="弹丸重量(kg) (默认: 10.0)")
+    parser.add_argument("--launch-angle-deg", type=float, default=None,
+                        help="固定发射仰角(°)，不设则45°±3°随机波动")
+    parser.add_argument("--interval-ms", type=int, default=60000,
+                        help="上报间隔毫秒(ms) (默认: 60000 = 60秒)")
+
+    parser.add_argument("--wire-diameter-mm", type=float, default=20.0,
+                        help="弹簧线径(mm) (默认: 20.0)")
+    parser.add_argument("--coil-mean-diameter-mm", type=float, default=150.0,
+                        help="弹簧中径(mm) (默认: 150.0)")
+    parser.add_argument("--active-coils", type=int, default=12,
+                        help="弹簧有效圈数 (默认: 12)")
+    parser.add_argument("--material", choices=["65mn", "50crva"], default="65mn",
+                        help="弹簧材料 (默认: 65mn)")
+
+    parser.add_argument("--randomize-mass", action="store_true",
+                        help="弹丸重量每台随机±2kg波动")
+    parser.add_argument("--randomize-angle", action="store_true",
+                        help="忽略--launch-angle-deg，每台独立随机")
+    parser.add_argument("--randomize-interval", action="store_true",
+                        help="上报间隔每台随机±5秒波动")
+
     args = parser.parse_args()
+
+    fixed_parameters = args.launch_angle_deg is not None and not args.randomize_angle
+
+    print("=" * 70)
+    print("霹雳车扭力弹簧储能仿真系统 - 传感器模拟器 v2.0")
+    print("=" * 70)
+    print(f"目标服务器: {args.host}:{args.port}")
+    print(f"模拟设备数: {args.machines}")
+    print(f"弹丸重量:   {args.mass_kg:.2f} kg{' (随机波动)' if args.randomize_mass else ''}")
+    print(f"发射仰角:   {args.launch_angle_deg if args.launch_angle_deg else '45°±3°'}"
+          f"{' (固定模式)' if fixed_parameters else ' (随机模式)'}")
+    print(f"上报间隔:   {args.interval_ms} ms{' (随机波动)' if args.randomize_interval else ''}")
+    print(f"弹簧线径:   {args.wire_diameter_mm:.1f} mm")
+    print(f"弹簧中径:   {args.coil_mean_diameter_mm:.1f} mm")
+    print(f"有效圈数:   {args.active_coils}")
+    print(f"材料:       {MATERIAL_LIBRARY[args.material]['name']}")
+    print("=" * 70)
 
     threads = []
     for i in range(args.machines):
         machine_id = f"TREB-{i+1:03d}"
-        mass = args.mass + random.uniform(-2, 2)
-        interval = args.interval + random.randint(-5, 5)
+
+        mass = args.mass_kg
+        if args.randomize_mass:
+            mass += random.uniform(-2.0, 2.0)
+
+        launch_angle = None if args.randomize_angle else args.launch_angle_deg
+
+        interval_ms = args.interval_ms
+        if args.randomize_interval:
+            interval_ms += random.randint(-5000, 5000)
+            interval_ms = max(1000, interval_ms)
+
         sim = TrebuchetSensorSimulator(
             machine_id=machine_id,
             server_host=args.host,
             server_port=args.port,
-            interval_sec=max(5, interval),
-            projectile_mass=mass
+            interval_ms=interval_ms,
+            projectile_mass=mass,
+            launch_angle_deg=launch_angle,
+            wire_diameter_mm=args.wire_diameter_mm,
+            coil_mean_diameter_mm=args.coil_mean_diameter_mm,
+            active_coils=args.active_coils,
+            material_key=args.material,
+            fixed_parameters=fixed_parameters
         )
         t = threading.Thread(target=sim.run, daemon=True)
         t.start()
         threads.append(t)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     print(f"\n已启动 {len(threads)} 台模拟器线程。按 Ctrl+C 退出。\n")
 
@@ -366,6 +512,7 @@ def main():
     except KeyboardInterrupt:
         print("\n正在停止所有模拟器...")
         time.sleep(1)
+        print("所有模拟器已停止。")
 
 
 if __name__ == "__main__":

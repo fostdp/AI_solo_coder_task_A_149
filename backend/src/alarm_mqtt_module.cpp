@@ -1,4 +1,6 @@
 #include "alarm_mqtt_module.h"
+#include "logger.h"
+#include "metrics_collector.h"
 
 #include <iostream>
 #include <chrono>
@@ -105,12 +107,24 @@ bool AlarmMqttModule::isDuplicate(const bus::AlertTriggerMessage& alert) {
 bool AlarmMqttModule::processAndEmitAlert(const bus::AlertTriggerMessage& alert) {
     if (isDuplicate(alert)) {
         deduped_++;
+        LOG_INFO("alarm_mqtt", "去重忽略告警: machine_id={}, type={}, window={}",
+                 alert.getMachineId(), static_cast<int>(alert.kind), deduped_.load());
         return false;
     }
     received_++;
     bool ok = publishToMqtt(alert);
-    if (ok) published_ok_++;
-    else published_fail_++;
+    if (ok) {
+        published_ok_++;
+        LOG_INFO("alarm_mqtt", "告警推送成功: machine_id={}, type={}, level={}",
+                 alert.getMachineId(),
+                 static_cast<int>(alert.kind),
+                 alert.level == bus::RiskLevel::CRITICAL ? "CRITICAL" : "WARNING");
+    } else {
+        published_fail_++;
+        LOG_ERROR("alarm_mqtt", "告警推送失败: machine_id={}, type={}, broker={}:{}",
+                  alert.getMachineId(), static_cast<int>(alert.kind),
+                  config_.mqtt_host, config_.mqtt_port);
+    }
 
     {
         std::lock_guard<std::mutex> lock(handler_mutex_);

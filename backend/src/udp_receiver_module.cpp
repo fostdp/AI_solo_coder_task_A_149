@@ -1,4 +1,6 @@
 #include "udp_receiver_module.h"
+#include "logger.h"
+#include "metrics_collector.h"
 
 #include <sstream>
 #include <cstring>
@@ -211,6 +213,8 @@ void UdpReceiverModule::receiveLoop() {
         bool parsed = parsePacketToMessage(raw, msg);
         if (!parsed) {
             dropped_invalid_++;
+            MetricsCollector::instance().incrementUdpPacketsReceived(false);
+            LOG_WARN("udp_receiver", "解析失败丢弃: 原始长度={}", bytes);
             continue;
         }
 
@@ -221,15 +225,24 @@ void UdpReceiverModule::receiveLoop() {
         }
         if (!valid && config_.drop_invalid_packets) {
             dropped_invalid_++;
+            MetricsCollector::instance().incrementUdpPacketsReceived(false);
+            LOG_WARN("udp_receiver", "校验失败丢弃: machine_id={}, torsion_angle={}",
+                     msg.getMachineId(), msg.torsion_angle_rad);
             continue;
         }
 
         valid_ok_++;
+        MetricsCollector::instance().incrementUdpPacketsReceived(true);
         dispatchToBus(msg);
 
         if (packet_handler_) {
             std::lock_guard<std::mutex> lock(handler_mutex_);
             if (packet_handler_) packet_handler_(msg, valid);
+        }
+
+        if (total_received_ % 1000 == 0) {
+            LOG_INFO("udp_receiver", "已接收 {} 包, 有效 {}, 丢弃 {}",
+                     total_received_.load(), valid_ok_.load(), dropped_invalid_.load());
         }
     }
 }

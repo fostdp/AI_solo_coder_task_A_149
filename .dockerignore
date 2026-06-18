@@ -1,0 +1,50 @@
+# Build
+build/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+ENV/
+
+# Node / frontend
+node_modules/
+frontend/js/*.js.gz
+frontend/js/*.map
+frontend/css/*.css.gz
+frontend/*.html.gz
+frontend/config/*.json.gz
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+*.local.yml
+
+# Data
+data/
+*.db

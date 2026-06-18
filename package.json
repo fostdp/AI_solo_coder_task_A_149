@@ -1,0 +1,14 @@
+{
+  "name": "trebuchet-frontend-build",
+  "version": "2.0.0",
+  "description": "Build scripts for Trebuchet Sim frontend",
+  "private": true,
+  "scripts": {
+    "gzip": "node scripts/gzip_frontend.js",
+    "lint": "node --check frontend/js/physics.js && node --check frontend/js/app.js && node --check frontend/js/traction_trebuchet_3d.js && node --check frontend/js/range_panel.js",
+    "serve": "python3 -m http.server 8080 --directory frontend"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

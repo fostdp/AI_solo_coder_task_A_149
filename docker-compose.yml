@@ -1,0 +1,146 @@
+services:
+  clickhouse:
+    build:
+      context: .
+      dockerfile: docker/clickhouse/Dockerfile
+    container_name: trebuchet-clickhouse
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/?query=SELECT%201"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - trebuchet-net
+
+  mqtt-broker:
+    build:
+      context: .
+      dockerfile: docker/mqtt/Dockerfile
+    container_name: trebuchet-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mqtt_data:/mosquitto/data
+      - mqtt_logs:/mosquitto/log
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-t", "$$SYS/broker/uptime", "-n"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - trebuchet-net
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
+      target: runtime
+    container_name: trebuchet-backend
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      mqtt-broker:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "9000:9000/udp"
+    environment:
+      - TZ=UTC
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - MQTT_HOST=mqtt-broker
+      - MQTT_PORT=1883
+      - UDP_PORT=9000
+      - HTTP_PORT=8080
+      - METRICS_PORT=8081
+    volumes:
+      - backend_logs:/app/logs
+      - ./config:/app/config:ro
+      - ./frontend:/app/frontend:ro
+    command: [
+      "/app/trebuchet_backend",
+      "--udp-port", "9000",
+      "--http-port", "8080",
+      "--mqtt-host", "mqtt-broker",
+      "--mqtt-port", "1883",
+      "--ch-host", "clickhouse",
+      "--ch-port", "8123",
+      "--spring-config", "/app/config/spring_params.json",
+      "--traj-config", "/app/config/trajectory_params.json"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - trebuchet-net
+
+  simulator:
+    build:
+      context: .
+      dockerfile: docker/simulator/Dockerfile
+    container_name: trebuchet-simulator
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+    volumes:
+      - simulator_logs:/app/logs
+    command: [
+      "python3", "trebuchet_sensor_simulator.py",
+      "--host", "backend",
+      "--port", "9000",
+      "--machines", "3",
+      "--mass-kg", "10.0",
+      "--interval-ms", "60000",
+      "--material", "65mn",
+      "--randomize-interval"
+    ]
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "trebuchet_sensor_simulator.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - trebuchet-net
+
+volumes:
+  clickhouse_data:
+    name: trebuchet_clickhouse_data
+  clickhouse_logs:
+    name: trebuchet_clickhouse_logs
+  mqtt_data:
+    name: trebuchet_mqtt_data
+  mqtt_logs:
+    name: trebuchet_mqtt_logs
+  backend_logs:
+    name: trebuchet_backend_logs
+  simulator_logs:
+    name: trebuchet_simulator_logs
+
+networks:
+  trebuchet-net:
+    driver: bridge
+    name: trebuchet-net

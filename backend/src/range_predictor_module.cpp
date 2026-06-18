@@ -1,4 +1,6 @@
 #include "range_predictor_module.h"
+#include "logger.h"
+#include "metrics_collector.h"
 
 #include <fstream>
 #include <sstream>
@@ -150,9 +152,10 @@ bool RangePredictorModule::computeTrajectory(const bus::SpringResultMessage& spr
                                               double launch_angle_deg,
                                               double release_velocity,
                                               double actual_range_m,
-                                              const std::string&,
+                                              const std::string& machine_id,
                                               int64_t,
                                               bus::RangeResultMessage& out) {
+    auto t0 = std::chrono::steady_clock::now();
     physics::ProjectileConfig local_cfg = projectile_config_;
     local_cfg.mass = projectile_mass_kg;
 
@@ -178,6 +181,35 @@ bool RangePredictorModule::computeTrajectory(const bus::SpringResultMessage& spr
     out.insufficient_range_flag = actual_range_m > 0 &&
         actual_range_m < out.predicted_range_m * config_.insufficient_range_factor ? 1 : 0;
     out.temperature_k = pred.temperature_k > 250 ? pred.temperature_k : 288.15;
+
+    MetricLabels labels;
+    labels.machine_id = machine_id;
+    labels.material = "";
+    labels.active_coils = "";
+
+    MetricsCollector::instance().incrementPredictionsMade();
+    MetricsCollector::instance().setRangePredicted(pred.predicted_range, labels);
+    MetricsCollector::instance().setRangeActual(actual_range_m, labels);
+    MetricsCollector::instance().setMachNumber(pred.max_mach, labels);
+    MetricsCollector::instance().setOptimalLaunchAngle(
+        out.optimal_launch_angle_deg, labels);
+
+    auto t1 = std::chrono::steady_clock::now();
+    double latency = std::chrono::duration<double>(t1 - t0).count();
+    MetricsCollector::instance().observeLatency("range_predictor.compute", latency);
+
+    if (out.optimal_launch_angle_deg > 0.0 &&
+        std::abs(out.optimal_launch_angle_deg - launch_angle_deg) > 5.0) {
+        LOG_INFO("range_predictor",
+                 "机器[{}] 最优角度={:.1f}°, 当前={:.1f}°, 预测射程={:.1f}m, 马赫={:.2f}",
+                 machine_id, out.optimal_launch_angle_deg, launch_angle_deg,
+                 pred.predicted_range, pred.max_mach);
+    }
+
+    if (predictions_ % 1000 == 0) {
+        LOG_INFO("range_predictor", "已预测 {} 次, 告警 {} 次", predictions_.load(), alerts_.load());
+    }
+
     return true;
 }
 
@@ -201,6 +233,12 @@ bool RangePredictorModule::detectRangeDeficits(const bus::RangeResultMessage& ra
     a.max_mach = range.max_mach;
     if (bus_ && bus_->push(bus::QueueChannel::RANGE_TO_ALARM, a)) {
         alerts_++;
+        MetricsCollector::instance().incrementAlertsEmitted(
+            "insufficient_range", "warning");
+        LOG_WARN("range_predictor",
+                 "射程不足告警: machine_id={}, actual={:.1f}m, predicted={:.1f}m, factor={:.2f}",
+                 machine_id, range.actual_range_m, range.predicted_range_m,
+                 config_.insufficient_range_factor);
         return true;
     }
     return false;

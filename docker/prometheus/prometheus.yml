@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'trebuchet-monitor'
+
+rule_files:
+  - "alerts/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  - job_name: 'trebuchet-backend'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['backend:8081']
+    metrics_path: '/metrics'
+    params:
+      format: ['prometheus']
+
+  - job_name: 'clickhouse'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['clickhouse:9363']
+
+  - job_name: 'mqtt-broker'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['mqtt-broker:9273']
