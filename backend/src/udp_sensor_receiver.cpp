@@ -120,6 +120,12 @@ bool UdpSensorReceiver::parsePacket(
     const std::string& raw_data,
     SensorDataPacket& out_packet
 ) {
+    out_packet.efficiency = 0.0;
+    out_packet.cycle_count = 0;
+    out_packet.cyclic_damage_ratio = 0.0;
+    out_packet.plastic_strain = 0.0;
+    out_packet.max_mach = 0.0;
+
     std::istringstream iss(raw_data);
     std::string field;
     std::vector<std::string> fields;
@@ -143,6 +149,11 @@ bool UdpSensorReceiver::parsePacket(
             else if (key == "projectile_mass") out_packet.projectile_mass = std::stod(value);
             else if (key == "launch_angle") out_packet.launch_angle = std::stod(value);
             else if (key == "spring_status") out_packet.spring_status = value;
+            else if (key == "efficiency") out_packet.efficiency = std::stod(value);
+            else if (key == "cycle_count") out_packet.cycle_count = std::stoll(value);
+            else if (key == "cyclic_damage_ratio") out_packet.cyclic_damage_ratio = std::stod(value);
+            else if (key == "plastic_strain") out_packet.plastic_strain = std::stod(value);
+            else if (key == "max_mach") out_packet.max_mach = std::stod(value);
         }
         out_packet.timestamp = std::chrono::system_clock::now();
         return !out_packet.machine_id.empty();
@@ -156,6 +167,11 @@ bool UdpSensorReceiver::parsePacket(
         out_packet.actual_range = std::stod(fields[4]);
         out_packet.projectile_mass = std::stod(fields[5]);
         out_packet.launch_angle = std::stod(fields[6]);
+        if (fields.size() > 8) out_packet.efficiency = std::stod(fields[8]);
+        if (fields.size() > 9) out_packet.cycle_count = std::stoll(fields[9]);
+        if (fields.size() > 10) out_packet.cyclic_damage_ratio = std::stod(fields[10]);
+        if (fields.size() > 11) out_packet.plastic_strain = std::stod(fields[11]);
+        if (fields.size() > 12) out_packet.max_mach = std::stod(fields[12]);
     } catch (...) {
         return false;
     }
