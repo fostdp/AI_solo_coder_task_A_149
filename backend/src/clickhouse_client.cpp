@@ -144,7 +144,10 @@ bool ClickHouseClient::insertSensorData(const SensorRecord& record) {
     query << "INSERT INTO sensor_data ("
           << "machine_id, timestamp, torsion_angle, stored_energy, "
           << "release_velocity, actual_range, predicted_range, efficiency, "
-          << "projectile_mass, launch_angle, spring_status, risk_level) VALUES ("
+          << "projectile_mass, launch_angle, spring_status, risk_level, "
+          << "shear_stress, elastic_stress, plastic_strain, cycle_count, "
+          << "cyclic_damage_ratio, modulus_reduction, max_mach, "
+          << "compressibility_correction, fatigue_risk) VALUES ("
           << "'" << escapeString(record.machine_id) << "', "
           << "'" << formatTimestamp(record.timestamp) << "', "
           << record.torsion_angle << ", "
@@ -156,7 +159,16 @@ bool ClickHouseClient::insertSensorData(const SensorRecord& record) {
           << record.projectile_mass << ", "
           << record.launch_angle << ", "
           << "'" << escapeString(record.spring_status) << "', "
-          << "'" << escapeString(record.risk_level) << "')";
+          << "'" << escapeString(record.risk_level) << "', "
+          << record.shear_stress << ", "
+          << record.elastic_stress << ", "
+          << record.plastic_strain << ", "
+          << record.cycle_count << ", "
+          << record.cyclic_damage_ratio << ", "
+          << record.modulus_reduction << ", "
+          << record.max_mach << ", "
+          << record.compressibility_correction << ", "
+          << static_cast<int>(record.fatigue_risk) << ")";
 
     std::string response = httpPost(
         impl_->config.host,
@@ -182,7 +194,8 @@ bool ClickHouseClient::insertAlert(const AlertRecord& record) {
     query << "INSERT INTO alerts ("
           << "machine_id, timestamp, alert_type, alert_level, message, "
           << "torsion_angle, stored_energy, actual_range, "
-          << "predicted_range, threshold_value) VALUES ("
+          << "predicted_range, threshold_value, cyclic_damage_ratio, "
+          << "cycle_count, max_mach) VALUES ("
           << "'" << escapeString(record.machine_id) << "', "
           << "'" << formatTimestamp(record.timestamp) << "', "
           << "'" << escapeString(record.alert_type) << "', "
@@ -192,7 +205,10 @@ bool ClickHouseClient::insertAlert(const AlertRecord& record) {
           << record.stored_energy << ", "
           << record.actual_range << ", "
           << record.predicted_range << ", "
-          << record.threshold_value << ")";
+          << record.threshold_value << ", "
+          << record.cyclic_damage_ratio << ", "
+          << record.cycle_count << ", "
+          << record.max_mach << ")";
 
     std::string response = httpPost(
         impl_->config.host,
@@ -208,14 +224,23 @@ bool ClickHouseClient::insertSpringEnergy(const SpringEnergyRecord& record) {
     std::ostringstream query;
     query << "INSERT INTO spring_energy_data ("
           << "machine_id, torsion_angle, stored_energy, shear_stress, "
-          << "spring_constant, efficiency, yield_strength_ratio) VALUES ("
+          << "elastic_stress, plastic_strain, spring_constant, efficiency, "
+          << "yield_strength_ratio, cycle_count, cyclic_damage_ratio, "
+          << "modulus_reduction, back_stress, degraded_yield_strength) VALUES ("
           << "'" << escapeString(record.machine_id) << "', "
           << record.torsion_angle << ", "
           << record.stored_energy << ", "
           << record.shear_stress << ", "
+          << record.elastic_stress << ", "
+          << record.plastic_strain << ", "
           << record.spring_constant << ", "
           << record.efficiency << ", "
-          << record.yield_strength_ratio << ")";
+          << record.yield_strength_ratio << ", "
+          << record.cycle_count << ", "
+          << record.cyclic_damage_ratio << ", "
+          << record.modulus_reduction << ", "
+          << record.back_stress << ", "
+          << record.degraded_yield_strength << ")";
 
     std::string response = httpPost(
         impl_->config.host,
@@ -233,8 +258,9 @@ bool ClickHouseClient::insertRangePrediction(
     std::ostringstream query;
     query << "INSERT INTO range_predictions ("
           << "machine_id, projectile_mass, launch_angle, release_velocity, "
-          << "predicted_range, max_height, flight_time, air_resistance_factor) "
-          << "VALUES ("
+          << "predicted_range, max_height, flight_time, air_resistance_factor, "
+          << "max_mach, compressibility_correction, impact_velocity, "
+          << "impact_mach, temperature_k) VALUES ("
           << "'" << escapeString(record.machine_id) << "', "
           << record.projectile_mass << ", "
           << record.launch_angle << ", "
@@ -242,7 +268,47 @@ bool ClickHouseClient::insertRangePrediction(
           << record.predicted_range << ", "
           << record.max_height << ", "
           << record.flight_time << ", "
-          << record.air_resistance_factor << ")";
+          << record.air_resistance_factor << ", "
+          << record.max_mach << ", "
+          << record.compressibility_correction << ", "
+          << record.impact_velocity << ", "
+          << record.impact_mach << ", "
+          << record.temperature_k << ")";
+
+    std::string response = httpPost(
+        impl_->config.host,
+        impl_->config.port,
+        "/?database=" + impl_->config.database + "&user=" + impl_->config.username,
+        query.str()
+    );
+    return response.find("HTTP/1.1 200") != std::string::npos ||
+           response.find("Ok.") != std::string::npos;
+}
+
+bool ClickHouseClient::insertCyclicFatigueLog(
+    const std::string& machine_id,
+    int64_t cycle_count,
+    double plastic_strain_amplitude,
+    double accumulated_plastic_strain,
+    double damaged_shear_modulus,
+    double damaged_yield_strength,
+    double damage_parameter,
+    int64_t remaining_life_cycles
+) {
+    std::ostringstream query;
+    query << "INSERT INTO cyclic_fatigue_log ("
+          << "machine_id, cycle_count, plastic_strain_amplitude, "
+          << "accumulated_plastic_strain, damaged_shear_modulus, "
+          << "damaged_yield_strength, damage_parameter, remaining_life_cycles) "
+          << "VALUES ("
+          << "'" << escapeString(machine_id) << "', "
+          << cycle_count << ", "
+          << plastic_strain_amplitude << ", "
+          << accumulated_plastic_strain << ", "
+          << damaged_shear_modulus << ", "
+          << damaged_yield_strength << ", "
+          << damage_parameter << ", "
+          << remaining_life_cycles << ")";
 
     std::string response = httpPost(
         impl_->config.host,
@@ -262,7 +328,10 @@ std::vector<ClickHouseClient::SensorRecord> ClickHouseClient::queryRecentSensorD
     std::ostringstream query;
     query << "SELECT machine_id, toString(timestamp), torsion_angle, "
           << "stored_energy, release_velocity, actual_range, predicted_range, "
-          << "efficiency, projectile_mass, launch_angle, spring_status, risk_level "
+          << "efficiency, projectile_mass, launch_angle, spring_status, risk_level, "
+          << "shear_stress, elastic_stress, plastic_strain, cycle_count, "
+          << "cyclic_damage_ratio, modulus_reduction, max_mach, "
+          << "compressibility_correction, fatigue_risk "
           << "FROM sensor_data ";
     if (!machine_id.empty()) {
         query << "WHERE machine_id = '" << escapeString(machine_id) << "' ";
@@ -288,6 +357,7 @@ std::vector<ClickHouseClient::SensorRecord> ClickHouseClient::queryRecentSensorD
         std::istringstream ls(line);
         SensorRecord r;
         std::string ts_str;
+        int fatigue_int = 0;
         std::getline(ls, r.machine_id, '\t');
         std::getline(ls, ts_str, '\t');
         ls >> r.torsion_angle; ls.ignore();
@@ -300,6 +370,16 @@ std::vector<ClickHouseClient::SensorRecord> ClickHouseClient::queryRecentSensorD
         ls >> r.launch_angle; ls.ignore();
         std::getline(ls, r.spring_status, '\t');
         std::getline(ls, r.risk_level, '\t');
+        ls >> r.shear_stress; ls.ignore();
+        ls >> r.elastic_stress; ls.ignore();
+        ls >> r.plastic_strain; ls.ignore();
+        ls >> r.cycle_count; ls.ignore();
+        ls >> r.cyclic_damage_ratio; ls.ignore();
+        ls >> r.modulus_reduction; ls.ignore();
+        ls >> r.max_mach; ls.ignore();
+        ls >> r.compressibility_correction; ls.ignore();
+        ls >> fatigue_int;
+        r.fatigue_risk = static_cast<uint8_t>(fatigue_int);
         results.push_back(r);
     }
     return results;
@@ -313,7 +393,8 @@ std::vector<ClickHouseClient::AlertRecord> ClickHouseClient::queryRecentAlerts(
     std::ostringstream query;
     query << "SELECT machine_id, toString(timestamp), alert_type, alert_level, "
           << "message, torsion_angle, stored_energy, actual_range, "
-          << "predicted_range, threshold_value "
+          << "predicted_range, threshold_value, cyclic_damage_ratio, "
+          << "cycle_count, max_mach "
           << "FROM alerts ";
     if (!machine_id.empty()) {
         query << "WHERE machine_id = '" << escapeString(machine_id) << "' ";
@@ -348,7 +429,10 @@ std::vector<ClickHouseClient::AlertRecord> ClickHouseClient::queryRecentAlerts(
         ls >> r.stored_energy; ls.ignore();
         ls >> r.actual_range; ls.ignore();
         ls >> r.predicted_range; ls.ignore();
-        ls >> r.threshold_value;
+        ls >> r.threshold_value; ls.ignore();
+        ls >> r.cyclic_damage_ratio; ls.ignore();
+        ls >> r.cycle_count; ls.ignore();
+        ls >> r.max_mach;
         results.push_back(r);
     }
     return results;
@@ -359,7 +443,8 @@ std::vector<ClickHouseClient::MachineStatus> ClickHouseClient::queryAllMachineSt
     std::ostringstream query;
     query << "SELECT machine_id, toString(last_report_time), last_torsion_angle, "
           << "last_stored_energy, last_release_velocity, last_actual_range, "
-          << "last_predicted_range, current_risk_level, unacknowledged_alerts "
+          << "last_predicted_range, current_risk_level, total_cycles, "
+          << "current_damage_ratio, last_max_mach, unacknowledged_alerts "
           << "FROM latest_machine_status FORMAT TabSeparated";
 
     std::string response = httpPost(
@@ -388,6 +473,9 @@ std::vector<ClickHouseClient::MachineStatus> ClickHouseClient::queryAllMachineSt
         ls >> r.last_actual_range; ls.ignore();
         ls >> r.last_predicted_range; ls.ignore();
         std::getline(ls, r.current_risk_level, '\t');
+        ls >> r.total_cycles; ls.ignore();
+        ls >> r.current_damage_ratio; ls.ignore();
+        ls >> r.last_max_mach; ls.ignore();
         ls >> r.unacknowledged_alerts;
         results.push_back(r);
     }
