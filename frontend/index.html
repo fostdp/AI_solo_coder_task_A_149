@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代霹雳车扭力弹簧储能仿真与射程预测系统</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <header class="app-header">
+            <h1>古代霹雳车（投石机）扭力弹簧储能仿真与射程预测系统</h1>
+            <div class="header-info">
+                <span id="system-status" class="status-badge status-ok">系统运行中</span>
+                <span id="current-time" class="current-time"></span>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <aside class="sidebar left-sidebar">
+                <section class="panel">
+                    <h2>设备状态监控</h2>
+                    <div id="machine-status-list" class="machine-list">
+                        <div class="loading">加载中...</div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <h2>告警信息</h2>
+                    <div id="alert-list" class="alert-list">
+                        <div class="loading">加载中...</div>
+                    </div>
+                </section>
+            </aside>
+
+            <section class="center-content">
+                <div class="viewer-container">
+                    <div class="viewer-tabs">
+                        <button class="tab-btn active" data-tab="3d-view">三维模型</button>
+                        <button class="tab-btn" data-tab="spring-view">弹簧储能仿真</button>
+                        <button class="tab-btn" data-tab="trajectory-view">弹道轨迹</button>
+                    </div>
+
+                    <div class="tab-content active" id="3d-view">
+                        <div id="three-canvas-container" class="canvas-container">
+                            <canvas id="three-canvas"></canvas>
+                            <div class="canvas-controls">
+                                <div class="control-group">
+                                    <label>当前选择设备:</label>
+                                    <select id="selected-machine">
+                                        <option value="">-- 请选择 --</option>
+                                    </select>
+                                </div>
+                                <div class="control-group">
+                                    <label>动画状态:</label>
+                                    <span id="animation-status">待机</span>
+                                </div>
+                                <button id="btn-fire" class="action-btn">模拟发射</button>
+                                <button id="btn-reset" class="action-btn secondary">重置</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tab-content" id="spring-view">
+                        <div class="spring-view-container">
+                            <div class="spring-canvas-wrapper">
+                                <canvas id="spring-canvas"></canvas>
+                            </div>
+                            <div class="spring-info-panel">
+                                <h3>弹簧参数配置</h3>
+                                <div class="form-group">
+                                    <label>钢丝直径 (mm):</label>
+                                    <input type="number" id="spring-wire-d" value="20" step="0.5" min="1" max="100">
+                                </div>
+                                <div class="form-group">
+                                    <label>弹簧中径 (mm):</label>
+                                    <input type="number" id="spring-mean-d" value="150" step="5" min="10" max="1000">
+                                </div>
+                                <div class="form-group">
+                                    <label>有效圈数:</label>
+                                    <input type="number" id="spring-coils" value="12" step="1" min="1" max="100">
+                                </div>
+                                <div class="form-group">
+                                    <label>扭转角 (°):</label>
+                                    <input type="range" id="torsion-slider" min="0" max="180" value="120" step="1">
+                                    <span id="torsion-value">120°</span>
+                                </div>
+                                <h3>计算结果</h3>
+                                <div class="result-grid">
+                                    <div class="result-item">
+                                        <span class="result-label">弹簧刚度 (N·m/rad):</span>
+                                        <span class="result-value" id="spring-constant">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">储能 (J):</span>
+                                        <span class="result-value highlight" id="spring-energy">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">最大剪应力 (MPa):</span>
+                                        <span class="result-value" id="shear-stress">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">屈服强度比 (%):</span>
+                                        <span class="result-value" id="yield-ratio">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">能量转换效率:</span>
+                                        <span class="result-value" id="spring-efficiency">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">风险等级:</span>
+                                        <span class="result-value risk-level" id="spring-risk">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tab-content" id="trajectory-view">
+                        <div class="trajectory-container">
+                            <div class="trajectory-canvas-wrapper">
+                                <canvas id="trajectory-canvas"></canvas>
+                                <div class="trajectory-overlay" id="trajectory-overlay"></div>
+                            </div>
+                            <div class="trajectory-panel">
+                                <h3>弹道参数配置</h3>
+                                <div class="form-group">
+                                    <label>弹丸质量 (kg):</label>
+                                    <input type="number" id="proj-mass" value="10" step="0.5" min="0.1" max="200">
+                                </div>
+                                <div class="form-group">
+                                    <label>发射初速度 (m/s):</label>
+                                    <input type="number" id="proj-velocity" value="35" step="0.5" min="1" max="200">
+                                </div>
+                                <div class="form-group">
+                                    <label>发射仰角 (°):</label>
+                                    <input type="range" id="angle-slider" min="5" max="85" value="45" step="1">
+                                    <span id="angle-value">45°</span>
+                                </div>
+                                <div class="form-group">
+                                    <label>空气阻力系数:</label>
+                                    <input type="number" id="drag-factor" value="1.0" step="0.1" min="0" max="3">
+                                </div>
+                                <button id="btn-calc-trajectory" class="action-btn primary">计算弹道</button>
+                                <h3>预测结果</h3>
+                                <div class="result-grid">
+                                    <div class="result-item">
+                                        <span class="result-label">预测射程 (m):</span>
+                                        <span class="result-value highlight" id="pred-range">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">最大高度 (m):</span>
+                                        <span class="result-value" id="pred-height">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">飞行时间 (s):</span>
+                                        <span class="result-value" id="pred-time">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">最佳发射角 (°):</span>
+                                        <span class="result-value" id="opt-angle">--</span>
+                                    </div>
+                                    <div class="result-item">
+                                        <span class="result-label">落地速度 (m/s):</span>
+                                        <span class="result-value" id="impact-vel">--</span>
+                                    </div>
+                                </div>
+                                <h3>多参数对比</h3>
+                                <div class="form-group">
+                                    <label>对比项目:</label>
+                                    <select id="compare-mode">
+                                        <option value="angle">不同发射角</option>
+                                        <option value="velocity">不同初速度</option>
+                                        <option value="mass">不同弹丸质量</option>
+                                    </select>
+                                </div>
+                                <button id="btn-compare" class="action-btn secondary">生成对比曲线</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="data-chart-panel">
+                    <h2>实时传感器数据</h2>
+                    <div class="chart-toolbar">
+                        <div class="control-group">
+                            <label>设备:</label>
+                            <select id="chart-machine">
+                                <option value="">全部设备</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label>数据类型:</label>
+                            <select id="chart-type">
+                                <option value="range">射程趋势</option>
+                                <option value="energy">储能趋势</option>
+                                <option value="angle">扭转角趋势</option>
+                                <option value="efficiency">效率趋势</option>
+                            </select>
+                        </div>
+                        <button id="btn-refresh-data" class="action-btn small">刷新</button>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="data-chart-canvas"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <aside class="sidebar right-sidebar">
+                <section class="panel">
+                    <h2>实时参数</h2>
+                    <div class="realtime-stats" id="realtime-stats">
+                        <div class="loading">等待数据...</div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <h2>历史数据查询</h2>
+                    <div class="form-group">
+                        <label>设备:</label>
+                        <select id="history-machine">
+                            <option value="">全部</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>数据条数:</label>
+                        <input type="number" id="history-limit" value="50" min="10" max="500" step="10">
+                    </div>
+                    <button id="btn-query-history" class="action-btn primary full-width">查询</button>
+                    <div class="history-result" id="history-result"></div>
+                </section>
+            </aside>
+        </main>
+
+        <footer class="app-footer">
+            <p>古代霹雳车仿真系统 | 军事史复原研究团队 © 2024</p>
+        </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="js/physics.js"></script>
+    <script src="js/trebuchet-model.js"></script>
+    <script src="js/spring-animation.js"></script>
+    <script src="js/trajectory-view.js"></script>
+    <script src="js/data-chart.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
