@@ -23,6 +23,11 @@ struct SensorDataPacket {
     double projectile_mass;
     double launch_angle;
     std::string spring_status;
+    double efficiency;
+    int64_t cycle_count;
+    double cyclic_damage_ratio;
+    double plastic_strain;
+    double max_mach;
 };
 
 using SensorDataCallback = std::function<void(const SensorDataPacket&)>;
