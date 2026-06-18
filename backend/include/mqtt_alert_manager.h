@@ -32,7 +32,8 @@ enum class AlertType {
     INSUFFICIENT_RANGE,
     EFFICIENCY_LOW,
     SENSOR_TIMEOUT,
-    SYSTEM_ERROR
+    SYSTEM_ERROR,
+    CYCLIC_FATIGUE_RISK
 };
 
 struct AlertMessage {
@@ -76,6 +77,13 @@ public:
         const std::string& machine_id,
         double current_efficiency,
         double expected_efficiency
+    );
+    bool publishCyclicFatigueWarning(
+        const std::string& machine_id,
+        int64_t cycle_count,
+        double cyclic_damage_ratio,
+        double plastic_strain,
+        int64_t remaining_life_cycles
     );
 
     void setAlertCallback(AlertCallback callback);
