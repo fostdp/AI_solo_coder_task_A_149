@@ -1,8 +1,88 @@
 const App = (function () {
     let selectedMachineId = '';
     let machineCache = [];
+    let springConfig = null;
+    let trajectoryConfig = null;
 
-    function init() {
+    const CONFIG_URLS = {
+        spring: 'config/spring_params.json',
+        trajectory: 'config/trajectory_params.json'
+    };
+
+    async function loadConfigJson(url) {
+        try {
+            const resp = await fetch(url, { cache: 'no-cache' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return await resp.json();
+        } catch (e) {
+            console.warn('[App] config load failed:', url, e);
+            return null;
+        }
+    }
+
+    function applySpringConfigToPhysics(cfg) {
+        if (!cfg || !window.TrebuchetPhysics) return;
+        const p = window.TrebuchetPhysics;
+        if (cfg.materials && cfg.defaultMaterial && cfg.materials[cfg.defaultMaterial]) {
+            const m = cfg.materials[cfg.defaultMaterial];
+            if (m.shearModulus) p.DEFAULT_MATERIAL && (p.DEFAULT_MATERIAL.G = m.shearModulus);
+            if (p.getDefaultSpringConfig) {
+                const sc = p.getDefaultSpringConfig();
+                if (m.shearModulus) sc.G = m.shearModulus;
+                if (m.yieldStrength) sc.tauY0 = m.yieldStrength;
+                if (m.fatigueDuctilityCoeff) sc.fatigue.eps_f = m.fatigueDuctilityCoeff;
+                if (m.fatigueDuctilityExp) sc.fatigue.c = m.fatigueDuctilityExp;
+                if (m.cyclicStrengthCoeff) sc.fatigue.sigma_f = m.cyclicStrengthCoeff;
+                if (m.cyclicStrengthExp) sc.fatigue.b = m.cyclicStrengthExp;
+            }
+        }
+        if (cfg.geometry) {
+            const geo = cfg.geometry;
+            if (p.getDefaultSpringConfig) {
+                const sc = p.getDefaultSpringConfig();
+                if (geo.wireDiameterMm) sc.d = geo.wireDiameterMm / 1000;
+                if (geo.meanDiameterMm) sc.D = geo.meanDiameterMm / 1000;
+                if (geo.activeCoils) sc.Na = geo.activeCoils;
+            }
+        }
+        if (cfg.cyclicSoftening && p.getDefaultSpringConfig) {
+            const sc = p.getDefaultSpringConfig();
+            if (!sc.cyclic) sc.cyclic = p.createCyclicState && p.createCyclicState() || {};
+            Object.assign(sc.cyclic, cfg.cyclicSoftening);
+        }
+    }
+
+    function applyTrajectoryConfigToPhysics(cfg) {
+        if (!cfg || !window.TrebuchetPhysics) return;
+        const p = window.TrebuchetPhysics;
+        if (cfg.atmosphere) {
+            const a = cfg.atmosphere;
+            if (a.g !== undefined) p.GRAVITY = a.g;
+            if (a.rho !== undefined) p.AIR_DENSITY = a.rho;
+            if (a.T0 !== undefined) p.SUTHERLAND_T0 = a.T0;
+            if (a.SuthMu0 !== undefined) p.SUTHERLAND_MU0 = a.SuthMu0;
+            if (a.SuthS !== undefined) p.SUTHERLAND_S = a.SuthS;
+            if (a.gamma !== undefined) p.GAMMA = a.gamma;
+            if (a.R !== undefined) p.GAS_CONSTANT_R = a.R;
+        }
+        if (cfg.compressibility && p.setCompressibilityParams) {
+            p.setCompressibilityParams(cfg.compressibility);
+        }
+    }
+
+    async function init() {
+        springConfig = await loadConfigJson(CONFIG_URLS.spring);
+        trajectoryConfig = await loadConfigJson(CONFIG_URLS.trajectory);
+        applySpringConfigToPhysics(springConfig);
+        applyTrajectoryConfigToPhysics(trajectoryConfig);
+        if (springConfig || trajectoryConfig) {
+            const status = [];
+            if (springConfig) status.push('弹簧配置已加载');
+            if (trajectoryConfig) status.push('弹道配置已加载');
+            const badge = document.getElementById('system-status');
+            if (badge) badge.textContent += ' · ' + status.join('+');
+        }
+
         initTabs();
         initTimeDisplay();
         initSpringView();
@@ -12,9 +92,21 @@ const App = (function () {
         initHistoryQuery();
 
         TrebuchetModel.init('three-canvas');
+        if (window.TractionTrebuchet3D) {
+            try { TractionTrebuchet3D.init('three-canvas-alt', { useCompressibleDrag: true }); }
+            catch (e) { console.warn('[App] TractionTrebuchet3D alt init:', e); }
+        }
         SpringAnimation.init('spring-canvas');
         TrajectoryView.init('trajectory-canvas');
         DataChart.init('data-chart-canvas');
+        if (window.RangePanel) {
+            try {
+                RangePanel.init('range-panel-root', { autoPredict: true });
+                RangePanel.setOnPredict((r, full) => {
+                    if (window.DataChart && DataChart.onTrajectoryPredict) DataChart.onTrajectoryPredict(r, full);
+                });
+            } catch (e) { console.warn('[App] RangePanel init:', e); }
+        }
 
         TrebuchetModel.setArmAngle(-Math.PI / 6);
         TrebuchetModel.resetProjectile();

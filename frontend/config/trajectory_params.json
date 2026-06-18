@@ -1,0 +1,44 @@
+{
+  "$schema": "trebuchet-trajectory-config-v1",
+  "description": "前端弹道参数配置（与后端trajectory_params.json保持同步）",
+  "projectile": {
+    "massKg": 10,
+    "diameterM": 0.2,
+    "dragCd0": 0.47,
+    "areaM2": 0.0314
+  },
+  "atmosphere": {
+    "g": 9.80665,
+    "rho": 1.225,
+    "T0": 288.15,
+    "lapse": 0.0065,
+    "SuthT0": 273.15,
+    "SuthMu0": 0.00001716,
+    "SuthS": 110.4,
+    "gamma": 1.4,
+    "R": 287.058
+  },
+  "compressibility": {
+    "Ma_incomp": 0.3,
+    "Ma_subsonic_max": 0.8,
+    "Ma_transonic_max": 1.2,
+    "Ma_crit": 0.75,
+    "Cd_wave_peak": 0.35,
+    "Ma_peak": 1.05,
+    "KTCap": 2.5,
+    "Cd_cone_super": 0.7,
+    "FrictionSuper": 1.15
+  },
+  "integration": {
+    "dtPredict": 0.001,
+    "dtFull": 0.01,
+    "tMax": 100,
+    "angleMin": 10,
+    "angleMax": 80,
+    "angleStep": 1
+  },
+  "range": {
+    "optimalPercent": 85,
+    "minFactor": 0.85
+  }
+}

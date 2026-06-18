@@ -1,0 +1,55 @@
+{
+  "$schema": "trebuchet-spring-config-v1",
+  "description": "古代霹雳车扭力弹簧几何与材料参数配置",
+  "defaultMaterial": "steel65mn",
+  "materials": {
+    "steel65mn": {
+      "name": "65Mn弹簧钢",
+      "shearModulusPa": 79300000000,
+      "yieldStrengthPa": 785000000,
+      "densityKgM3": 7850,
+      "fatigueDuctilityCoeff": 0.42,
+      "fatigueDuctilityExp": -0.58,
+      "cyclicStrengthCoeffPa": 1300000000,
+      "cyclicStrengthExp": -0.10
+    },
+    "steel50crva": {
+      "name": "50CrVA弹簧钢",
+      "shearModulusPa": 78500000000,
+      "yieldStrengthPa": 1080000000,
+      "densityKgM3": 7800,
+      "fatigueDuctilityCoeff": 0.38,
+      "fatigueDuctilityExp": -0.55,
+      "cyclicStrengthCoeffPa": 1650000000,
+      "cyclicStrengthExp": -0.08
+    }
+  },
+  "geometry": {
+    "wireDiameterMm": 20,
+    "coilMeanDiameterMm": 150,
+    "activeCoils": 12,
+    "maxTorsionAngleDeg": 360
+  },
+  "cyclicSoftening": {
+    "chabocheC1": 3500,
+    "chabocheD1": 120,
+    "isotropicQSatRatio": 0.15,
+    "isotropicB": 18,
+    "modulusDegradationFloor": 0.55,
+    "yieldStrengthDegradationFloor": 0.50,
+    "fatigueDamageThresholdWarning": 0.50,
+    "fatigueDamageThresholdCritical": 0.80
+  },
+  "fractureRisk": {
+    "yieldStrengthRatioWarning": 0.70,
+    "yieldStrengthRatioCritical": 0.85,
+    "fractureEfficiencyPenalty": 0.50
+  },
+  "efficiency": {
+    "lowStressRatioCap": 0.30,
+    "midStressRatioCap": 0.60,
+    "highStressRatioCap": 0.85,
+    "damagePenaltyCoeff": 0.60,
+    "efficiencyFloor": 0.50
+  }
+}

@@ -46,6 +46,9 @@ struct SpringEnergyResult {
     double efficiency;
     double yield_strength_ratio;
     double cyclic_damage_ratio;
+    double modulus_reduction;
+    double back_stress_pa;
+    double degraded_yield_strength_pa;
     int cycle_count;
     bool fracture_risk;
     bool fatigue_risk;
@@ -77,6 +80,11 @@ struct RangePredictionResult {
     double air_resistance_factor;
     double max_mach;
     double compressibility_correction;
+    double impact_velocity;
+    double impact_mach;
+    double optimal_launch_angle_deg;
+    double avg_compressibility_correction;
+    double temperature_k;
     bool insufficient_range;
 };
 

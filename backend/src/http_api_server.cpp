@@ -39,9 +39,9 @@ HttpResponse HttpResponse::json(int status, const std::string& json_body) {
 }
 
 HttpResponse HttpResponse::error(int status, const std::string& message) {
-    std::ostringstream json;
-    json << "{\"error\":" << status << ",\"message\":\"" << message << "\"}";
-    return json(status, json.str());
+    std::ostringstream json_ss;
+    json_ss << "{\"error\":" << status << ",\"message\":\"" << message << "\"}";
+    return HttpResponse::json(status, json_ss.str());
 }
 
 struct HttpApiServer::Impl {

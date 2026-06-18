@@ -320,7 +320,7 @@ bool ClickHouseClient::insertCyclicFatigueLog(
            response.find("Ok.") != std::string::npos;
 }
 
-std::vector<ClickHouseClient::SensorRecord> ClickHouseClient::queryRecentSensorData(
+std::vector<SensorRecord> ClickHouseClient::queryRecentSensorData(
     const std::string& machine_id,
     int limit
 ) {
@@ -385,7 +385,7 @@ std::vector<ClickHouseClient::SensorRecord> ClickHouseClient::queryRecentSensorD
     return results;
 }
 
-std::vector<ClickHouseClient::AlertRecord> ClickHouseClient::queryRecentAlerts(
+std::vector<AlertRecord> ClickHouseClient::queryRecentAlerts(
     const std::string& machine_id,
     int limit
 ) {

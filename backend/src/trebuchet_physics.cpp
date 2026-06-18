@@ -1,6 +1,14 @@
 #include "trebuchet_physics.h"
 #include <algorithm>
 #include <numeric>
+#include <cmath>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static constexpr double GAMMA = 1.4;
+static double gamma_ratio() { return GAMMA; }
 
 namespace trebuchet {
 namespace physics {
@@ -30,7 +38,7 @@ double calculatePrandtlGlauertCorrection(double mach_number) {
     double beta = std::sqrt(1.0 - mach_number * mach_number);
     double karman_tsien = 1.0 / beta
         + (mach_number * mach_number) / (2.0 * beta * beta * beta)
-        * (1.0 + (gamma - 1.0) / 2.0 * beta * beta);
+        * (1.0 + (GAMMA - 1.0) / 2.0 * beta * beta);
     return std::min(karman_tsien, 1.0 / beta * 1.5);
 }
 

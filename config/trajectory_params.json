@@ -1,0 +1,51 @@
+{
+  "$schema": "trebuchet-trajectory-config-v1",
+  "description": "古代霹雳车弹丸抛体动力学参数配置",
+  "projectileDefaults": {
+    "massKg": 10,
+    "diameterM": 0.2,
+    "dragCoefficientIncompressible": 0.47,
+    "crossSectionAreaM2": 0.0314
+  },
+  "atmosphere": {
+    "gravityMps2": 9.80665,
+    "airDensityKgm3": 1.225,
+    "referenceTemperatureK": 288.15,
+    "temperatureLapseRateKpm": 0.0065,
+    "sutherlandT0K": 273.15,
+    "sutherlandMu0Pas": 0.00001716,
+    "sutherlandS": 110.4,
+    "specificHeatRatio": 1.4,
+    "specificGasConstant": 287.058
+  },
+  "compressibility": {
+    "incompressibleMach": 0.3,
+    "subsonicMachMax": 0.8,
+    "transonicMachMax": 1.2,
+    "criticalMach": 0.75,
+    "waveDragPeakCoeff": 0.35,
+    "waveDragPeakMach": 1.05,
+    "karmanTsienCorrectionCap": 2.5,
+    "supersonicConeDrag": 0.7,
+    "supersonicFrictionFactor": 1.15,
+    "transonicReFactorThreshold": 0.95,
+    "transonicReFactorCoeff": 2.0
+  },
+  "numericalIntegration": {
+    "predictorTimeStepSec": 0.001,
+    "fullTrajectoryTimeStepSec": 0.01,
+    "maxFlightTimeSec": 100,
+    "optimalAngleMinDeg": 10,
+    "optimalAngleMaxDeg": 80,
+    "optimalAngleStepDeg": 1
+  },
+  "rangeRequirement": {
+    "optimalRangePercent": 85,
+    "minimumRangeFactor": 0.85
+  },
+  "reynolds": {
+    "laminarReCap": 500000,
+    "lowReCorrectionExp": 100000,
+    "lowReCorrectionCoeff": 0.3
+  }
+}

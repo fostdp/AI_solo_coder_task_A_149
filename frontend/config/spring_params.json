@@ -1,0 +1,47 @@
+{
+  "$schema": "trebuchet-spring-config-v1",
+  "description": "前端弹簧参数配置（与后端spring_params.json保持同步）",
+  "defaultMaterial": "steel65mn",
+  "materials": {
+    "steel65mn": {
+      "name": "65Mn弹簧钢",
+      "shearModulus": 79300000000,
+      "yieldStrength": 785000000,
+      "density": 7850,
+      "fatigueDuctilityCoeff": 0.42,
+      "fatigueDuctilityExp": -0.58,
+      "cyclicStrengthCoeff": 1300000000,
+      "cyclicStrengthExp": -0.10
+    },
+    "steel50crva": {
+      "name": "50CrVA弹簧钢",
+      "shearModulus": 78500000000,
+      "yieldStrength": 1080000000,
+      "density": 7800,
+      "fatigueDuctilityCoeff": 0.38,
+      "fatigueDuctilityExp": -0.55,
+      "cyclicStrengthCoeff": 1650000000,
+      "cyclicStrengthExp": -0.08
+    }
+  },
+  "geometry": {
+    "wireDiameterMm": 20,
+    "meanDiameterMm": 150,
+    "activeCoils": 12,
+    "maxTorsionDeg": 360
+  },
+  "cyclicSoftening": {
+    "chabocheC1": 3500,
+    "chabocheD1": 120,
+    "QSatRatio": 0.15,
+    "b": 18,
+    "G_Floor": 0.55,
+    "tauY_Floor": 0.50,
+    "fatigueWarning": 0.50,
+    "fatigueCritical": 0.80
+  },
+  "fractureRisk": {
+    "warningRatio": 0.70,
+    "criticalRatio": 0.85
+  }
+}
