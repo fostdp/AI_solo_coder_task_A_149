@@ -124,15 +124,29 @@ const App = (function () {
             (result.storedEnergy / 1000).toFixed(2) + ' kJ';
         document.getElementById('shear-stress').textContent =
             (result.shearStress / 1e6).toFixed(1) + ' MPa';
+        document.getElementById('elastic-stress').textContent =
+            ((result.elasticStress || 0) / 1e6).toFixed(1) + ' MPa';
+        document.getElementById('plastic-strain').textContent =
+            (result.plasticStrain || 0).toExponential(3);
         document.getElementById('yield-ratio').textContent =
             (result.yieldStrengthRatio * 100).toFixed(1) + '%';
         document.getElementById('spring-efficiency').textContent =
             (result.efficiency * 100).toFixed(1) + '%';
+        document.getElementById('cycle-count').textContent =
+            result.cycleCount || 0;
+        document.getElementById('damage-ratio').textContent =
+            ((result.cyclicDamageRatio || 0) * 100).toFixed(2) + '%';
+        document.getElementById('modulus-reduction').textContent =
+            (result.modulusReduction || 1.0).toFixed(3);
 
         const riskEl = document.getElementById('spring-risk');
         riskEl.textContent = result.riskLevel === 'normal' ? '正常'
             : result.riskLevel === 'warning' ? '警告' : '危险';
         riskEl.className = 'result-value risk-level ' + result.riskLevel;
+
+        const fatigueEl = document.getElementById('fatigue-risk');
+        fatigueEl.textContent = result.fatigueRisk ? '告警' : '正常';
+        fatigueEl.className = 'result-value risk-level ' + (result.fatigueRisk ? 'critical' : 'normal');
     }
 
     function initTrajectoryView() {
@@ -176,6 +190,12 @@ const App = (function () {
             result.launchAngleOptimal.toFixed(1) + '°';
         document.getElementById('impact-vel').textContent =
             result.impactVelocity.toFixed(2) + ' m/s';
+        document.getElementById('max-mach').textContent =
+            (result.maxMach || TrebuchetPhysics.calculateMachNumber(velocity)).toFixed(3);
+        document.getElementById('impact-mach').textContent =
+            (result.impactMach || TrebuchetPhysics.calculateMachNumber(result.impactVelocity)).toFixed(3);
+        document.getElementById('compressibility-correction').textContent =
+            (result.compressibilityCorrection || 1.0).toFixed(3);
     }
 
     function generateComparison() {
@@ -249,14 +269,17 @@ const App = (function () {
             }
 
             let html = '<table><thead><tr>';
-            html += '<th>设备</th><th>扭转角</th><th>储能</th><th>射程</th><th>风险</th>';
+            html += '<th>设备</th><th>循环</th><th>扭转角</th><th>储能</th><th>损伤比</th><th>最大Ma</th><th>射程</th><th>风险</th>';
             html += '</tr></thead><tbody>';
             data.data.forEach(d => {
                 const riskCls = d.risk_level || 'normal';
                 html += `<tr>
                     <td>${d.machine_id}</td>
+                    <td>${d.cycle_count || 0}</td>
                     <td>${(d.torsion_angle || 0).toFixed(2)}</td>
                     <td>${(d.stored_energy || 0).toFixed(0)}</td>
+                    <td>${((d.cyclic_damage_ratio || 0) * 100).toFixed(1)}%</td>
+                    <td>${(d.max_mach || 0).toFixed(2)}</td>
                     <td>${(d.actual_range || 0).toFixed(1)}m</td>
                     <td>${d.risk_level || '-'}</td>
                 </tr>`;
@@ -315,6 +338,9 @@ const App = (function () {
                     </span>
                 </div>
                 <div class="machine-metrics">
+                    <span>循环: <b>${d.total_cycles || 0}</b></span>
+                    <span>损伤: <b>${((d.current_damage_ratio || 0) * 100).toFixed(1)}%</b></span>
+                    <span>最大Ma: <b>${(d.last_max_mach || 0).toFixed(2)}</b></span>
                     <span>扭转角: <b>${(d.last_torsion_angle || 0).toFixed(2)}rad</b></span>
                     <span>储能: <b>${(d.last_stored_energy || 0).toFixed(0)}J</b></span>
                     <span>射程: <b>${(d.last_actual_range || 0).toFixed(1)}m</b></span>
@@ -348,6 +374,9 @@ const App = (function () {
             if (sel) {
                 realtimeEl.innerHTML = `
                     <div class="stat-item"><span class="stat-label">设备ID</span><span class="stat-value">${sel.machine_id}</span></div>
+                    <div class="stat-item"><span class="stat-label">循环次数</span><span class="stat-value">${sel.total_cycles || 0}</span></div>
+                    <div class="stat-item"><span class="stat-label">累积损伤比</span><span class="stat-value">${((sel.current_damage_ratio || 0) * 100).toFixed(2)}%</span></div>
+                    <div class="stat-item"><span class="stat-label">最近最大马赫</span><span class="stat-value">${(sel.last_max_mach || 0).toFixed(3)} Ma</span></div>
                     <div class="stat-item"><span class="stat-label">扭转角</span><span class="stat-value">${(sel.last_torsion_angle || 0).toFixed(3)} rad</span></div>
                     <div class="stat-item"><span class="stat-label">弹簧储能</span><span class="stat-value">${(sel.last_stored_energy || 0).toFixed(0)} J</span></div>
                     <div class="stat-item"><span class="stat-label">释放速度</span><span class="stat-value">${(sel.last_release_velocity || 0).toFixed(2)} m/s</span></div>
@@ -373,7 +402,8 @@ const App = (function () {
             const level = a.alert_level === 'critical' || a.alert_level === 'warning' ? a.alert_level : 'info';
             const typeText = a.alert_type === 'spring_fracture_risk' ? '弹簧断裂风险'
                 : a.alert_type === 'insufficient_range' ? '射程不足'
-                : a.alert_type === 'efficiency_low' ? '效率偏低' : a.alert_type;
+                : a.alert_type === 'efficiency_low' ? '效率偏低'
+                : a.alert_type === 'cyclic_fatigue_risk' ? '循环疲劳风险' : a.alert_type;
             html += `<div class="alert-item ${level}">
                 <div class="alert-header">
                     <span class="alert-type">${typeText}</span>
